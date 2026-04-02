@@ -1,30 +1,30 @@
 ---
 user-invocable: true
-description: 向现有调研outline补充items（调研对象）。
+description: Add items (research subjects) to existing research outline.
 allowed-tools: Bash, Read, Write, Glob, WebSearch, Task, AskUserQuestion
 ---
 > **Attribution:** Originally authored by [Weizhena](https://github.com/Weizhena/Deep-Research-skills). Included with attribution for use in the Deep query workflow.
 
-# Research Add Items - 补充调研对象
+# Research Add Items - Add Research Subjects
 
-## 触发方式
+## Trigger Method
 `/research-add-items`
 
-## 执行流程
+## Execution Process
 
-### Step 1: 自动定位Outline
-在当前工作目录查找 `*/outline.yaml` 文件，自动读取。
+### Step 1: Auto-locate Outline
+Search for `*/outline.yaml` files in the current working directory and read automatically.
 
-### Step 2: 并行获取补充来源
-同时进行：
-- **A. 询问用户**：需要补充哪些items？有具体名称吗？
-- **B. 询问是否需要Web Search**：是否启动agent搜索更多items？
+### Step 2: Parallel Collection of Additional Sources
+Execute simultaneously:
+- **A. Ask User**: What items need to be added? Do you have specific names?
+- **B. Ask About Web Search**: Should we start an agent to search for more items?
 
-### Step 3: 合并更新
-- 将新items追加到outline.yaml
-- 展示给用户确认
-- 避免重复
-- 保存更新后的outline
+### Step 3: Merge and Update
+- Append new items to outline.yaml
+- Show to user for confirmation
+- Avoid duplicates
+- Save updated outline
 
-## 输出
-更新后的 `{topic}/outline.yaml` 文件（原地修改）
+## Output
+Updated `{topic}/outline.yaml` file (modified in place)

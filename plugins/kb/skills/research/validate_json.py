@@ -10,14 +10,14 @@ from pathlib import Path
 import yaml
 
 CATEGORY_MAPPING = {
-    "基本信息": ["basic_info", "基本信息"],
-    "技术特性": ["technical_features", "technical_characteristics", "技术特性"],
-    "性能指标": ["performance_metrics", "performance", "性能指标"],
-    "里程碑意义": ["milestone_significance", "milestones", "里程碑意义"],
-    "商业信息": ["business_info", "commercial_info", "商业信息"],
-    "竞争与生态": ["competition_ecosystem", "competition", "竞争与生态"],
-    "历史沿革": ["history", "历史沿革"],
-    "市场定位": ["market_positioning", "market", "市场定位"],
+    "Basic Info": ["basic_info", "Basic Info"],
+    "Technical Features": ["technical_features", "technical_characteristics", "Technical Features"],
+    "Performance Metrics": ["performance_metrics", "performance", "Performance Metrics"],
+    "Milestone Significance": ["milestone_significance", "milestones", "Milestone Significance"],
+    "Business Info": ["business_info", "commercial_info", "Business Info"],
+    "Competition & Ecosystem": ["competition_ecosystem", "competition", "Competition & Ecosystem"],
+    "History": ["history", "History"],
+    "Market Positioning": ["market_positioning", "market", "Market Positioning"],
 }
 
 _SKIP_KEYS = {"_source_file", "uncertain"}
@@ -68,7 +68,7 @@ def validate_json(json_path, all_fields, required_fields, field_categories):
     missing_required = missing & required_fields
     missing_by_category = defaultdict(list)
     for field in missing:
-        missing_by_category[field_categories.get(field, "未知")].append(field)
+        missing_by_category[field_categories.get(field, "Unknown")].append(field)
     return {
         "file": json_path.name,
         "total_defined": len(all_fields),
@@ -85,37 +85,37 @@ def validate_json(json_path, all_fields, required_fields, field_categories):
 
 
 def print_result(result, verbose=True):
-    status = "通过" if result["valid"] else "失败"
+    status = "PASS" if result["valid"] else "FAIL"
     line = "=" * 60
     print(f"\n{line}")
     print(f"[{status}] {result['file']}")
     print(line)
-    print(f"覆盖率: {result['coverage_rate']:.1f}% ({result['covered']}/{result['total_defined']})")
+    print(f"Coverage: {result['coverage_rate']:.1f}% ({result['covered']}/{result['total_defined']})")
     if result["missing_required"]:
-        print(f"\n[错误] 缺少必填字段 ({len(result['missing_required'])}):")
+        print(f"\n[ERROR] Missing required fields ({len(result['missing_required'])}):")
         print("\n".join(f"  - {f}" for f in result["missing_required"]))
     if verbose and result["missing_optional"]:
         missing_required = set(result["missing_required"])
-        print(f"\n[警告] 缺少可选字段 ({len(result['missing_optional'])}):")
+        print(f"\n[WARNING] Missing optional fields ({len(result['missing_optional'])}):")
         for cat in sorted(result["missing_by_category"]):
             optional = [f for f in result["missing_by_category"][cat] if f not in missing_required]
             if optional:
                 print(f"  [{cat}]: {', '.join(optional)}")
     if verbose and result["extra_fields"]:
         extra = result["extra_fields"]
-        print(f"\n[信息] 额外字段 ({len(extra)}):")
+        print(f"\n[INFO] Extra fields ({len(extra)}):")
         print(f"  {', '.join(extra[:10])}")
         if len(extra) > 10:
-            print(f"  ... 还有 {len(extra) - 10} 个")
+            print(f"  ... and {len(extra) - 10} more")
 
 
 def main():
     import argparse
-    parser = argparse.ArgumentParser(description="验证JSON文件是否覆盖fields.yaml中定义的所有字段")
-    parser.add_argument("--fields", "-f", type=str, help="fields.yaml路径", default="fields.yaml")
-    parser.add_argument("--json", "-j", type=str, nargs="*", help="要验证的JSON文件路径")
-    parser.add_argument("--dir", "-d", type=str, help="包含JSON文件的目录", default="results")
-    parser.add_argument("--quiet", "-q", action="store_true", help="仅显示摘要")
+    parser = argparse.ArgumentParser(description="Validate JSON files against fields defined in fields.yaml")
+    parser.add_argument("--fields", "-f", type=str, help="Path to fields.yaml", default="fields.yaml")
+    parser.add_argument("--json", "-j", type=str, nargs="*", help="JSON file paths to validate")
+    parser.add_argument("--dir", "-d", type=str, help="Directory containing JSON files", default="results")
+    parser.add_argument("--quiet", "-q", action="store_true", help="Show summary only")
     args = parser.parse_args()
     fields_path = Path(args.fields)
     if not fields_path.exists():
@@ -124,35 +124,35 @@ def main():
                 fields_path = p
                 break
     if not fields_path.exists():
-        print(f"[错误] 找不到fields.yaml: {fields_path}")
+        print(f"[ERROR] Cannot find fields.yaml: {fields_path}")
         sys.exit(1)
-    print(f"字段定义文件: {fields_path}")
+    print(f"Field definition file: {fields_path}")
     all_fields, required_fields, field_categories = load_fields_yaml(fields_path)
-    print(f"总字段数: {len(all_fields)} (必填: {len(required_fields)}, 可选: {len(all_fields) - len(required_fields)})")
+    print(f"Total fields: {len(all_fields)} (required: {len(required_fields)}, optional: {len(all_fields) - len(required_fields)})")
     json_files = (
         [Path(p) for p in args.json]
         if args.json
         else sorted(Path(args.dir).glob("*.json")) if Path(args.dir).exists() else []
     )
     if not json_files:
-        print("[警告] 未找到JSON文件")
+        print("[WARNING] No JSON files found")
         sys.exit(0)
     results = []
     for json_path in json_files:
         if not json_path.exists():
-            print(f"[警告] 文件不存在: {json_path}")
+            print(f"[WARNING] File not found: {json_path}")
             continue
         result = validate_json(json_path, all_fields, required_fields, field_categories)
         results.append(result)
         print_result(result, verbose=not args.quiet)
     line = "=" * 60
     print(f"\n{line}")
-    print("汇总")
+    print("Summary")
     print(line)
     passed = sum(1 for r in results if r["valid"])
     avg_coverage = sum(r["coverage_rate"] for r in results) / len(results) if results else 0
-    print(f"验证通过: {passed}/{len(results)}")
-    print(f"平均覆盖率: {avg_coverage:.1f}%")
+    print(f"Validation passed: {passed}/{len(results)}")
+    print(f"Average coverage: {avg_coverage:.1f}%")
     if passed < len(results):
         sys.exit(1)
 
