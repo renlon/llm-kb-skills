@@ -1,0 +1,12 @@
+{
+  "name": "kb",
+  "version": "1.0.0",
+  "description": "Build and maintain LLM-powered knowledge bases as Obsidian wikis with compile, query, lint, and evolve workflows",
+  "author": {
+    "name": "rvk7895"
+  },
+  "homepage": "https://github.com/rvk7895/llm-knowledge-bases",
+  "repository": "https://github.com/rvk7895/llm-knowledge-bases",
+  "license": "MIT",
+  "keywords": ["knowledge-base", "obsidian", "wiki", "llm", "research"]
+}

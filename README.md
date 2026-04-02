@@ -12,35 +12,14 @@ Raw data from various sources is collected, compiled by an LLM into a `.md` wiki
 
 ## Installation
 
-### Option A: Personal skills (available across all projects)
+In Claude Code, run:
 
-```bash
-git clone https://github.com/rvk7895/llm-knowledge-bases.git
-cp -r llm-knowledge-bases/skills/kb-init ~/.claude/skills/kb-init
-cp -r llm-knowledge-bases/skills/kb ~/.claude/skills/kb
-cp -r llm-knowledge-bases/skills/research ~/.claude/skills/research
-cp -r llm-knowledge-bases/skills/research-deep ~/.claude/skills/research-deep
-cp -r llm-knowledge-bases/skills/research-add-fields ~/.claude/skills/research-add-fields
-cp -r llm-knowledge-bases/skills/research-add-items ~/.claude/skills/research-add-items
-cp -r llm-knowledge-bases/skills/research-report ~/.claude/skills/research-report
+```
+/plugin marketplace add rvk7895/llm-knowledge-bases
+/plugin install kb@llm-knowledge-bases
 ```
 
-### Option B: Project-local skills (available only in a specific project)
-
-```bash
-cd your-project/
-git clone https://github.com/rvk7895/llm-knowledge-bases.git /tmp/llm-kb
-cp -r /tmp/llm-kb/skills/* .claude/skills/
-```
-
-### Option C: Test without installing
-
-```bash
-git clone https://github.com/rvk7895/llm-knowledge-bases.git
-claude --plugin-dir ./llm-knowledge-bases
-```
-
-After installation, skills are available as `/kb-init`, `/kb`, `/research`, `/research-deep`, etc. in Claude Code.
+That's it. All skills (`kb-init`, `kb`, `research`, `research-deep`, etc.) are installed as a single plugin.
 
 ## Quick Start
 
@@ -60,14 +39,12 @@ After installation, skills are available as `/kb-init`, `/kb`, `/research`, `/re
 
 Web articles, academic papers, GitHub repos, local markdown, images, YouTube transcripts, datasets.
 
-## Directory Structure
+## Directory Structure (after running kb-init)
 
 ```
 raw/           -- Raw source documents
 wiki/          -- Compiled wiki (Obsidian vault)
 output/        -- Query results, reports, visualizations
-skills/        -- Claude Code skills
-docs/plans/    -- Design and implementation documents
 kb.yaml        -- Configuration
 CLAUDE.md      -- Project instructions for Claude
 ```

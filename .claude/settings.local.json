@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Skill(research)",
+      "Skill(research-deep)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(git init:*)",
+      "Bash(git filter-branch:*)",
+      "Bash(git remote:*)",
+      "Bash(git push:*)",
+      "WebSearch"
+    ]
+  }
+}
