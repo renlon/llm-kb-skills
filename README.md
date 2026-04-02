@@ -10,10 +10,42 @@ Raw data from various sources is collected, compiled by an LLM into a `.md` wiki
 - [Obsidian](https://obsidian.md)
 - Recommended Obsidian plugins: Web Clipper, Marp Slides, Dataview
 
+## Installation
+
+### Option A: Personal skills (available across all projects)
+
+```bash
+git clone https://github.com/rvk7895/llm-knowledge-bases.git
+cp -r llm-knowledge-bases/skills/kb-init ~/.claude/skills/kb-init
+cp -r llm-knowledge-bases/skills/kb ~/.claude/skills/kb
+cp -r llm-knowledge-bases/skills/research ~/.claude/skills/research
+cp -r llm-knowledge-bases/skills/research-deep ~/.claude/skills/research-deep
+cp -r llm-knowledge-bases/skills/research-add-fields ~/.claude/skills/research-add-fields
+cp -r llm-knowledge-bases/skills/research-add-items ~/.claude/skills/research-add-items
+cp -r llm-knowledge-bases/skills/research-report ~/.claude/skills/research-report
+```
+
+### Option B: Project-local skills (available only in a specific project)
+
+```bash
+cd your-project/
+git clone https://github.com/rvk7895/llm-knowledge-bases.git /tmp/llm-kb
+cp -r /tmp/llm-kb/skills/* .claude/skills/
+```
+
+### Option C: Test without installing
+
+```bash
+git clone https://github.com/rvk7895/llm-knowledge-bases.git
+claude --plugin-dir ./llm-knowledge-bases
+```
+
+After installation, skills are available as `/kb-init`, `/kb`, `/research`, `/research-deep`, etc. in Claude Code.
+
 ## Quick Start
 
-1. Clone this repo.
-2. Run `kb-init` to bootstrap a new knowledge base.
+1. Install the skills using one of the methods above.
+2. Run `/kb-init` to bootstrap a new knowledge base.
 3. Add raw sources to `raw/`.
 4. Ask Claude to "compile the wiki".
 
