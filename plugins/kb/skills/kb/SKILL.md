@@ -54,7 +54,8 @@ For each new or changed source, dispatch a sonnet subagent to:
 1. Read the raw source
 2. Determine type (article, paper, transcript, dataset, etc.)
 3. Extract concepts, claims, entities, and relationships
-4. Return a structured extraction object
+4. **Choose article format** for each concept -- `default` or `tutorial` (see format selection criteria below)
+5. Return a structured extraction object including the chosen format per concept
 
 ### Opus Orchestration
 
@@ -65,13 +66,33 @@ After extractions complete, opus:
 7. Add source backlinks to every article touched
 8. Auto-categorize articles into folders based on topic
 
-### Wiki Article Format
+### Wiki Article Formats
+
+The compile step supports two article formats. The sonnet subagent chooses the format per concept during extraction -- opus does NOT override this choice unless the result is clearly wrong.
+
+#### Format Selection Criteria
+
+Use **tutorial** when ALL of these are true:
+- The concept is a learnable technical skill, tool, pattern, or methodology
+- The source material contains enough depth for a meaningful deep-dive (not just a passing mention)
+- Someone would realistically study this concept to apply it in practice
+
+Use **default** for everything else:
+- People, organizations, events, historical facts
+- Datasets, benchmarks, reference tables
+- Concepts that are descriptive rather than instructional (e.g., a summary of a paper's findings)
+- Concepts where the source material is too thin for a full tutorial
+
+When in doubt, use **default**. A concise reference article is better than a padded tutorial.
+
+#### Default Format
 
 ```markdown
 ---
 title: "Concept Name"
 aliases: [alternate name, abbreviation]
 tags: [domain, topic]
+article_format: default
 sources:
   - "[[raw/articles/source-file.md]]"
 created: 2026-04-03
@@ -90,6 +111,57 @@ Detailed information extracted from sources.
 
 - Related to [[Other Concept]] because...
 - Contradicts [[Conflicting Idea]] on the point of...
+- Builds on [[Foundation Concept]]
+
+## Sources
+
+- [[raw/articles/source-file.md]] -- key claims extracted from this source
+```
+
+#### Tutorial Format
+
+For learnable technical concepts. Follows an easy-to-hard hierarchy so the reader can enter at their level.
+
+```markdown
+---
+title: "Concept Name"
+aliases: [alternate name, abbreviation]
+tags: [domain, topic]
+article_format: tutorial
+sources:
+  - "[[raw/articles/source-file.md]]"
+created: 2026-04-03
+updated: 2026-04-03
+---
+
+# Concept Name
+
+## Core Concept
+
+A high-level, plain-English summary. Use a beginner-friendly analogy to ground the idea before introducing any jargon.
+
+## Foundational Context
+
+Define essential vocabulary. Explain the problem this concept solves and why prior approaches fell short. Proactively address the "5 Whys" -- keep asking why until the root motivation is clear.
+
+## Technical Deep-Dive
+
+Transition into mechanics: architecture, algorithms, implementation details. Keep it accessible but rigorous. Use code blocks, diagrams (via `![[image.png]]`), and worked examples where appropriate.
+
+## Best Practices
+
+Real-world production considerations: scalability, cost, evaluation methods, common pitfalls, and failure modes. Link to related concepts via `[[wikilinks]]`.
+
+## Growth Path
+
+Practical next steps to build mastery:
+- Specific exercises or projects to try
+- Resources for further reading (link to other wiki articles or external sources)
+- Common progression from beginner to advanced usage
+
+## Relationships
+
+- Related to [[Other Concept]] because...
 - Builds on [[Foundation Concept]]
 
 ## Sources
@@ -140,7 +212,7 @@ The subagent decides and acts:
 1. **New knowledge?** — Did the response contain information not already in the wiki? (External data from Standard/Deep queries, new connections between concepts, corrections to existing articles, newly surfaced entities or claims)
 2. **If no** — exit silently. Log nothing. The query was just a read.
 3. **If yes** — act:
-   - **New concept** → create a wiki article following the standard article format, place in the right category folder
+   - **New concept** → create a wiki article using the appropriate format (default or tutorial, applying the same selection criteria as Compile), place in the right category folder
    - **Enrichment** → update existing articles with new information, add source backlinks
    - **Correction** → update articles where the response contradicted or superseded wiki content
    - **New connections** → add `[[wikilinks]]` between articles that the query revealed are related
