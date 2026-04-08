@@ -67,14 +67,37 @@ Ask how the user wants to get raw data in:
 
 Ask which formats the user wants: markdown (always on), Marp slides, matplotlib charts, HTML, CSV, Excalidraw, other. Use an extensible pattern so new formats can be added later.
 
-### 4. Maintenance Cadence
+### 4. External Sources (Optional)
+
+Ask if the user has existing folders of notes or documents outside the project that should be included in the knowledge base. These folders are managed manually by the user -- the kb skill reads them but never writes to them.
+
+For each external folder the user provides:
+- Verify the path exists
+- Ask for a short label (used in indexes, e.g., `lessons`, `work-notes`)
+- Optionally ask if it should be read-only (default: yes) -- read-only means compile will index and extract from these files but never modify them
+
+Store in `kb.yaml` under `external_sources`:
+
+```yaml
+external_sources:
+  - path: /Users/me/Documents/MLL/lessons
+    label: lessons
+    read_only: true
+  - path: /Users/me/notes/research
+    label: research
+    read_only: true
+```
+
+The user can add more external sources later by editing `kb.yaml` directly or re-running `kb-init`.
+
+### 5. Maintenance Cadence
 
 Inform about options:
 - Daily/hourly: `/loop` (e.g., `/loop 1d kb lint`)
 - Weekly/monthly: `/schedule`
 - Manual: just ask anytime
 
-### 5. Generate `kb.yaml`
+### 6. Generate `kb.yaml`
 
 Write `kb.yaml` at project root with paths, `output_formats`, obsidian config, and an `integrations` section. Example:
 
@@ -86,16 +109,16 @@ integrations:
 
 When the user sets up Smaug (during init or later), save the install path here. The kb skill reads this to find Smaug without searching every time.
 
-### 6. Scaffold Directories
+### 7. Scaffold Directories
 
 Create: `raw/articles/`, `raw/papers/`, `raw/repos/`, `raw/notes/`, `raw/images/`, `raw/transcripts/`, `raw/datasets/`, `wiki/`, `output/`. Plus `.obsidian/` if new vault.
 
-### 7. Write Project Files
+### 8. Write Project Files
 
 - `CLAUDE.md` -- project instructions for future sessions
 - `README.md` -- repo docs with prerequisites, setup, workflows, directory structure, and attribution for research skills
 
-### 8. Next Steps Guidance
+### 9. Next Steps Guidance
 
 Tell user what to do next: add sources, compile, and list available workflows (`compile`, `query`, `lint`, `evolve`).
 

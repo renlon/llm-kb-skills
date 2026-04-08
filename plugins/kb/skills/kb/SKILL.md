@@ -9,6 +9,24 @@ Main operating skill for LLM-maintained knowledge bases. Four workflows: **compi
 
 **First action in every invocation:** read `kb.yaml` from the project root. If missing, tell the user to run `kb-init` and stop.
 
+### External Sources
+
+`kb.yaml` may contain an `external_sources` list -- folders outside the project that should be included in compile, query, lint, and indexing. These are managed manually by the user.
+
+```yaml
+external_sources:
+  - path: /absolute/path/to/folder
+    label: my-notes
+    read_only: true
+```
+
+When `external_sources` is present:
+- **Compile** scans these paths alongside `raw/` for new/changed files. Sources are tracked in `_index.md` with their label prefix (e.g., `external:lessons/file.md`).
+- **Query** includes external source content when searching for relevant material.
+- **Lint** checks for orphan sources, stale articles, and broken links across external paths.
+- **read_only: true** (default) means the skill never modifies, moves, or deletes files in that folder. It only reads from them.
+- If an external path does not exist at runtime, log a warning and skip it -- do not fail the workflow.
+
 ## Obsidian-Native Formatting
 
 All wiki output MUST use Obsidian-native conventions:
@@ -44,8 +62,9 @@ Always set the `model` parameter explicitly when dispatching subagents.
 
 1. Read `wiki/_index.md` (lists every raw source with its last-compiled hash)
 2. Scan `raw/` recursively with Glob
-3. Diff against index: identify **new**, **changed**, and **deleted** sources
-4. Only process what changed -- never recompile the entire `raw/` folder
+3. Scan each `external_sources` path from `kb.yaml` (if any). Prefix entries in the index with `external:<label>/` to distinguish them from `raw/` sources.
+4. Diff against index: identify **new**, **changed**, and **deleted** sources
+5. Only process what changed -- never recompile the entire source tree
 
 ### Per-File Extraction (sonnet subagents)
 
@@ -233,7 +252,7 @@ The subagent decides and acts:
 
 1. **Broken links** -- `[[wikilinks]]` pointing to non-existent articles
 2. **Orphan articles** -- wiki articles with zero inbound links
-3. **Orphan sources** -- files in `raw/` that were never compiled
+3. **Orphan sources** -- files in `raw/` or `external_sources` paths that were never compiled
 4. **Stale articles** -- source file changed since the article was last compiled
 5. **Consistency** -- conflicting claims across different articles
 6. **Missing backlinks** -- links that should be bidirectional but aren't

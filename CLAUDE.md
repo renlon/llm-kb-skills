@@ -7,7 +7,8 @@
 
 ## Configuration
 
-- Always read `kb.yaml` at the project root before operating. It contains paths, output format preferences, and Obsidian config.
+- Always read `kb.yaml` at the project root before operating. It contains paths, output format preferences, Obsidian config, and external source paths.
+- `external_sources` in `kb.yaml` lists folders outside the project that are included in compile, lint, and indexing. These are read-only by default -- the skill never modifies files in external paths.
 
 ## Skills
 
