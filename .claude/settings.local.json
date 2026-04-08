@@ -12,7 +12,9 @@
       "WebSearch",
       "Bash(python3:*)",
       "Bash(pip install:*)",
-      "Bash(chmod:*)"
+      "Bash(chmod:*)",
+      "Read(//Users/longren/.claude/plugins/cache/llm-kb-skills/kb/**)",
+      "Read(//Users/longren/.claude/plugins/cache/llm-kb-skills/**)"
     ]
   }
 }

@@ -26,6 +26,7 @@
 - `[[wikilinks|display text]]` when the display name differs from the target.
 - YAML frontmatter on every article with: title, aliases, tags, article_format, sources.
 - `![[image.png]]` for image embeds.
+- Always leave a full empty line between any text/heading and the first row of a markdown table. Without that blank line, Obsidian treats the table as plain text.
 
 ## Article Formats
 
