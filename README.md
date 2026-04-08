@@ -29,8 +29,8 @@ Obsidian plugins (Dataview, Obsidian Git, etc.) are installed automatically by t
 In Claude Code, run:
 
 ```
-/plugin marketplace add rvk7895/llm-knowledge-bases
-/plugin install kb@llm-knowledge-bases
+/plugin marketplace add renlon/llm-kb-skills
+/plugin install kb@llm-kb-skills
 ```
 
 All skills are installed as a single plugin.
@@ -93,5 +93,6 @@ Once configured, paste any `x.com` link and the kb skill will fetch and compile 
 
 ## Attribution
 
+- [rvk7895](https://github.com/rvk7895/llm-knowledge-bases) -- Original codebase this project was forked from
 - [Andrej Karpathy](https://x.com/karpathy/status/2039805659525644595) -- Original vision for LLM-maintained knowledge bases
 - [Weizhena](https://github.com/Weizhena/Deep-Research-skills) -- Deep Research skills adapted for the research pipeline

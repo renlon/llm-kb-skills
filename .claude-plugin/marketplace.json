@@ -1,8 +1,7 @@
 {
-  "name": "llm-knowledge-bases",
+  "name": "llm-kb-skills",
   "owner": {
-    "name": "rvk7895",
-    "email": "rkal2009@gmail.com"
+    "name": "renlon"
   },
   "metadata": {
     "description": "Claude Code skills for building and maintaining LLM-powered personal knowledge bases as Obsidian wikis"
@@ -14,7 +13,7 @@
       "description": "Build and maintain LLM-powered knowledge bases as Obsidian wikis with compile, query, lint, and evolve workflows",
       "version": "1.3.0",
       "author": {
-        "name": "rvk7895"
+        "name": "renlon"
       }
     }
   ]
