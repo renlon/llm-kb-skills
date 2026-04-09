@@ -8,6 +8,8 @@ description: "Use when archiving or saving the current session's Q&A into lesson
 
 Archive substantive Q&A from the current conversation into `~/Documents/MLL/lessons/`. Merges new knowledge into existing lesson files or creates new ones, updates the README index, and pushes to the remote git repository.
 
+**Invocation:** `/kb-arc` (no arguments)
+
 **Executor:** Opus single-pass. No subagents.
 
 ## Workflow
@@ -66,11 +68,13 @@ For each grouped topic from Step 2:
 2. Identify what is genuinely new in the conversation that is not already covered
 3. **Technical Summary section:** Rewrite and integrate new knowledge into the existing summary. Do not just append paragraphs -- merge cleanly so the summary reads as a unified document with no redundancy.
 4. **Q&A Transcript section:** Append only new Q&A exchanges. Skip exchanges that cover ground already present in the file.
-5. Rename the file to update the date suffix to today's date using `git mv`:
+5. Rename the file to update the date suffix to today's date using `git mv`. If the existing file has no date suffix, skip the rename and write in place.
+
+Example (substitute actual filename and today's date):
 
 ```bash
 cd ~/Documents/MLL
-git mv "lessons/Old_Name_2026-04-07.md" "lessons/Old_Name_2026-04-09.md"
+git mv "lessons/KV_Cache_and_Attention_Mechanisms_2026-04-07.md" "lessons/KV_Cache_and_Attention_Mechanisms_2026-04-09.md"
 ```
 
 #### 5b: No Match -- Create New Lesson
@@ -116,11 +120,7 @@ Read `~/Documents/MLL/lessons/README.md`. Update the topics table in the `## Top
 Run these commands in sequence:
 
 ```bash
-cd ~/Documents/MLL
-git add lessons/ README.md
-git commit -m "<descriptive message>"
-git pull --rebase
-git push
+cd ~/Documents/MLL && git add lessons/ && git commit -m "<descriptive message>" && git pull --rebase && git push
 ```
 
 **Commit message format:**

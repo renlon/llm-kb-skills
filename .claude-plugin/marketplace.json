@@ -11,7 +11,7 @@
       "name": "kb",
       "source": "./plugins/kb",
       "description": "Build and maintain LLM-powered knowledge bases as Obsidian wikis with compile, query, lint, and evolve workflows",
-      "version": "1.3.4",
+      "version": "1.3.5",
       "author": {
         "name": "renlon"
       }
