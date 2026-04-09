@@ -19,6 +19,7 @@
 - `research-add-fields` -- Add field definitions to an existing research outline.
 - `research-add-items` -- Add items (research targets) to an existing research outline.
 - `research-report` -- Summarize deep research results into a markdown report.
+- `kb-arc` -- Archive session Q&A into MLL lessons with intelligent merge and auto git-push.
 
 ## Formatting Rules (Obsidian-Compatible)
 
