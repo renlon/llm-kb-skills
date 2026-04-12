@@ -169,7 +169,7 @@ shutil.move(tmp, state_path)
 
 **Corrupt state recovery:** Backup to `.notebooklm-state.yaml.bak.<ISO-timestamp>`, warn user, re-initialize empty state.
 
-**Pruning:** On every write, remove `runs` entries older than `cleanup_days * 2` (default 60 days).
+**Pruning:** On every write, remove `runs` entries older than `cleanup_days * 2` (default 14 days).
 
 **Concurrency:** Single-writer only. One MLL operation at a time. This is a known limitation.
 
@@ -218,7 +218,7 @@ print(hashlib.sha256('\n'.join(entries).encode()).hexdigest())
 
 ## Source Count Limits
 
-**Selection order:** Oldest-first. Incremental workflows sort by mtime ascending, take first `max_sources_per_notebook` (default 50, configurable in `kb.yaml`).
+**Selection order:** Oldest-first. Incremental workflows sort by mtime ascending, take first `max_sources_per_notebook` (default 45, configurable in `kb.yaml`).
 
 **When files exceed limit:**
 1. Sort all matching files oldest-first (by mtime ascending)
