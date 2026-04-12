@@ -27,6 +27,27 @@ When `external_sources` is present:
 - **read_only: true** (default) means the skill never modifies, moves, or deletes files in that folder. It only reads from them.
 - If an external path does not exist at runtime, log a warning and skip it -- do not fail the workflow.
 
+### X Enrichment Configuration
+
+`kb.yaml` may contain an `integrations.x.enrich` section controlling pre-compile enrichment of tweet files:
+
+```yaml
+integrations:
+  x:
+    enabled: true                # master toggle for X integration (default: true)
+    enrich:
+      threads: true              # stitch self-threads via bird CLI (default: true)
+      media: true                # download images/videos/PDFs (default: true)
+      video_max_mb: 100          # skip videos larger than this (default: 100)
+      max_files_per_run: 20      # cap enrichment candidates per compile (default: 20)
+      api_delay_ms: 1000         # delay between bird API calls in ms (default: 1000)
+    browser: chrome              # cookie source for bird CLI auth
+    browser_profile: null        # optional, for multi-profile browsers
+    media_dir: media/x           # vault-level media storage (outside raw/)
+```
+
+When `integrations.x.enrich` is present, compile runs Phase 0 (X Enrichment) before Incremental Detection. If the section is missing or both toggles are `false`, Phase 0 is skipped entirely.
+
 ## Obsidian-Native Formatting
 
 All wiki output MUST use Obsidian-native conventions:
@@ -58,6 +79,97 @@ Always set the `model` parameter explicitly when dispatching subagents.
 
 **Trigger:** User adds files to `raw/` and says "compile" or "update the wiki".
 
+### X Enrichment (Phase 0)
+
+Enriches raw tweet files before compilation. Stitches same-author self-threads and downloads media (images, videos, PDFs) into the vault. Runs only if `integrations.x.enrich` exists in `kb.yaml`.
+
+**Config check (first -- zero side effects):**
+
+1. Read `integrations.x` from `kb.yaml`. If `enabled` is false or `enrich` section missing --> skip Phase 0.
+2. If both `enrich.threads` and `enrich.media` are `false` --> log "X enrichment: both threads and media disabled -- skipping" and skip Phase 0. No bird CLI check, no auth, no file scan.
+
+**Guards (only if at least one enrich toggle is true):**
+
+3. Run `bird --version`. If fails --> log warning "bird CLI not found -- skipping enrichment", skip Phase 0.
+4. Build auth flags from config: `--cookie-source <integrations.x.browser>`. If `browser_profile` is set: add `--chrome-profile "<profile>"` (chrome) or `--firefox-profile "<profile>"` (firefox). These flags are referred to as `<bird-auth>` below.
+5. Run `bird whoami <bird-auth>`. If fails --> log "X auth expired -- skipping enrichment", skip Phase 0 entirely. Do not attempt per-file calls.
+
+**Scan and cap:**
+
+6. Glob `raw/articles/x/**/*.md`. For each file, apply two-stage eligibility:
+   - **Stage 1 (state):** Skip if frontmatter has `enriched: true`, `enriched: skipped`, or `enriched: merged`. Continue if no `enriched` field, `enriched: failed`, or `enriched: false`.
+   - **Stage 2 (URL):** Parse tweet URL from frontmatter `source` field only (not body). If no parseable tweet URL --> set `enriched: skipped`, remove from candidates.
+7. Separate candidates: **fresh** (no `enriched` field) and **retries** (`enriched: failed`/`false`). Sort each group by file mtime (oldest first).
+8. Apply `enrich.max_files_per_run` cap (default: 20): take fresh candidates first, fill remaining slots from retries. Log "N files deferred to next compile run" if more exist.
+
+**Path A -- Threads enabled** (`enrich.threads: true`, the default):
+
+9. For each selected candidate, fetch thread: `bird thread <tweet-id> --json --all <bird-auth>`. The response is `{ "tweets": [...] }` -- access the array via `.tweets`. Insert `enrich.api_delay_ms` (default: 1000ms) delay between calls.
+10. **Walk the self-thread chain** for each candidate:
+    - Record the bookmarked tweet's `authorId` (top-level string field) as the target author.
+    - **Walk UP:** From the bookmarked tweet, follow `inReplyToStatusId` links collecting tweets where `authorId` matches the target. Stop at a different author or the conversation root.
+    - **Walk DOWN (from bookmarked tweet only):** Starting from the bookmarked tweet, look for tweets whose `inReplyToStatusId` equals the current node's `id` AND whose `authorId` matches. If exactly one match: add it, advance, repeat. If zero or multiple: stop. Do NOT walk down from ancestors -- only from the bookmarked tweet.
+    - Merge ancestor chain + bookmarked tweet + descendant chain. Sort chronologically by `createdAt`.
+11. **Compute `thread_dedup_key`** = `"<root_id>:<leaf_id>"` from the stitched chain. For single tweets, both IDs are the same.
+12. **Cross-run dedup:** Scan files in `raw/articles/x/` with `enriched: true` for matching `thread_dedup_key`. If match found --> mark candidate `enriched: merged` with `canonical_file` pointing to the existing file (vault-relative path) and `thread_dedup_key`.
+13. **Within-run dedup:** Group remaining candidates by `thread_dedup_key`. If multiple share a key, select the canonical (tweet ID matching chain root, or earliest). Do NOT mark others merged yet -- defer until canonical succeeds.
+14. **Enrich each canonical:**
+    - If chain has 2+ tweets, stitch into the raw file using fenced markers:
+      ```
+      <!-- enrich:thread -->
+      > **Thread by @<author.username>** (N tweets):
+      >
+      > [1/N] First tweet text...
+      > [2/N] Second tweet text...
+      <!-- /enrich:thread -->
+      ```
+    - If `enrich.media: true`, download media from all tweets in the chain (see Media Download below).
+    - Set frontmatter: `thread_dedup_key`, `thread_root_id`, `thread_leaf_id`, `conversation_id`, `thread_length`, `enriched: true`, `enriched_at` (ISO 8601).
+    - On any failure (bird non-zero exit, bookmarked tweet missing from response, required parent missing during chain walk) --> set `enriched: failed`, continue to next candidate.
+15. **Finalize dedup:** For each within-run group whose canonical succeeded (`enriched: true`), mark non-canonicals `enriched: merged` with `canonical_file` (vault-relative path) and `thread_dedup_key`. If canonical failed, leave duplicates unchanged (eligible for retry).
+
+**Path B -- Media only** (`enrich.threads: false` AND `enrich.media: true`):
+
+16. For each selected candidate, fetch single tweet: `bird read <tweet-id> --json <bird-auth>`. Insert `api_delay_ms` delay between calls.
+17. Write identity fields: `thread_dedup_key: "<tweet_id>:<tweet_id>"`, `thread_root_id`, `thread_leaf_id` (all equal to the tweet ID). No thread stitching, no dedup.
+18. Download media from the bookmarked tweet only (see Media Download below).
+19. Set frontmatter: `enriched: true`, `enriched_at` (ISO 8601), identity fields. On failure --> `enriched: failed`.
+
+#### Media Download
+
+Downloads images, videos, and PDFs from tweets for vault-level preservation. Media is stored in `media/x/` at the vault root (sibling of `raw/`, NOT inside `raw/`). Obsidian resolves `![[filename]]` embeds by name from anywhere in the vault.
+
+1. Collect media from all tweets in the stitched chain (Path A) or the single tweet (Path B). Deduplicate by URL -- first chronological occurrence determines the filename.
+2. **Download by type:**
+
+   | Type | Source Field | Filename |
+   |------|-------------|----------|
+   | Photo | `media[].url` | `<source_tweet_id>-<n>.<detected_ext>` |
+   | Video / GIF | `media[].videoUrl` | `<source_tweet_id>-<n>.mp4` |
+   | PDF (linked) | Use `--json-full` flag, parse `_raw.legacy.entities.urls[].expanded_url` matching `.pdf`, `arxiv.org/pdf/`, `papers.ssrn.com`, `openreview.net/pdf` | `<source_tweet_id>-<n>.pdf` |
+
+   `<source_tweet_id>` = tweet containing the media. `<n>` = 1-indexed media position within that tweet. `<detected_ext>` = from URL path or magic bytes (JPEG `FF D8` --> `.jpg`, PNG `89 50 4E 47` --> `.png`).
+
+3. **Download command:** `curl -sfL --max-time 30 -o <dest> <url>`. Run `mkdir -p media/x/` before first download.
+4. **Post-download validation:**
+   - File > 1KB (reject tiny error pages)
+   - Images: verify magic bytes (JPEG or PNG)
+   - Videos: file > 10KB
+   - If validation fails: delete file, log warning, skip that media item
+5. **Video size guard:** Before downloading videos, send `curl -sfLI <url>` to check `Content-Length`. If exceeds `enrich.video_max_mb` (default: 100MB), skip and log as text link. If header absent, download with `--max-filesize`. After download, verify file size on disk -- delete if over limit.
+6. **PDF detection:** To find linked PDFs, re-fetch the tweet with `--json-full` and parse `_raw.legacy.entities.urls[].expanded_url`. There is no `links` field on bird responses -- expanded URLs are only available via `--json-full`.
+7. **Inject embeds** within fenced markers:
+   ```
+   <!-- enrich:media -->
+   > **Media:**
+   > ![[<source_tweet_id>-1.jpg]]
+   > ![[<source_tweet_id>-2.mp4]]
+   <!-- /enrich:media -->
+   ```
+   Failed downloads appear as text links: `> Failed to download: <url>`
+
+**v1 contract:** Enrichment enriches raw sources. Media and thread context are visible when browsing `raw/articles/x/` in Obsidian. The compile pipeline (Phases 1-4) remains text-only -- media embeds may or may not appear in wiki articles depending on the extractor.
+
 ### Incremental Detection
 
 1. Read `wiki/_index.md` (lists every raw source with its last-compiled hash)
@@ -65,6 +177,21 @@ Always set the `model` parameter explicitly when dispatching subagents.
 3. Scan each `external_sources` path from `kb.yaml` (if any). Prefix entries in the index with `external:<label>/` to distinguish them from `raw/` sources.
 4. Diff against index: identify **new**, **changed**, and **deleted** sources
 5. Only process what changed -- never recompile the entire source tree
+6. **Handle `enriched: merged` files** (state-derived, restart-safe): For each file in `raw/articles/x/` with `enriched: merged` in frontmatter:
+
+   a. **Validate `canonical_file`:** Read the merged file's `canonical_file` frontmatter (vault-relative path like `raw/articles/x/name.md`). Valid if ALL of: (1) path is under `raw/articles/x/`, (2) file exists, (3) target has `enriched: true`, (4) target's `thread_dedup_key` matches merged file's `thread_dedup_key`.
+
+   b. **If invalid:** Log warning. Do NOT clean up any index/source entries. Add the merged file to the process list as a normal source (live fallback -- preserves source coverage).
+
+   c. **If valid -- set flag FIRST, then clean up:** Write `needs_canonical_recompile: true` to the merged file's frontmatter and flush to disk BEFORE any cleanup. Then:
+      - Remove merged file entry from `wiki/_index.md` (if present)
+      - Remove merged file entry from `wiki/_sources.md` (if present)
+      - In any wiki article's frontmatter `sources:` array, replace the merged file with the canonical. If canonical already listed, just drop the merged entry.
+      - Log cleanup in `wiki/_evolution.md`
+
+   d. **Queue canonical:** Add the validated canonical to the process list (if not already there).
+
+   e. **Skip merged file from extraction:** Do not add valid-canonical merged files to the process list -- the canonical file covers them.
 
 ### Per-File Extraction (sonnet subagents)
 
@@ -196,6 +323,7 @@ After every compile, update these files:
 - **`wiki/_sources.md`** -- mapping from raw sources to wiki articles they contributed to
 - **`wiki/_categories.md`** -- auto-maintained category tree reflecting folder structure
 - **`wiki/_evolution.md`** -- append-only log of auto-evolve actions: `date | trigger | action | articles affected`
+- **Clear `needs_canonical_recompile`:** After all wiki changes are ready, scan `raw/articles/x/` for files with `needs_canonical_recompile: true`. For each, remove the field from frontmatter. Stage these changes alongside all other Phase 4 changes so they are included in the same commit. This ensures the one-shot requeue flag is cleared atomically with the compile results.
 
 ## Workflow 2: Query
 
@@ -345,3 +473,10 @@ And knowledge files with YAML frontmatter in `knowledge/articles/` or `knowledge
 - Forgetting to dispatch the auto-evolve subagent after a query -- it must always run, even if it usually exits silently
 - Refusing to process an X/Twitter link just because Smaug isn't installed -- always offer alternatives and accept manual paste
 - Trying to use WebFetch on X/Twitter URLs -- it always fails due to auth walls, don't bother
+- Placing media files inside `raw/` instead of `media/x/` at the vault root -- binary files in `raw/` get picked up by the compile glob as source candidates
+- Running bird API calls before the `bird whoami` auth preflight -- if auth is expired, every per-file call will fail
+- Marking duplicate files `enriched: merged` before the canonical is confirmed `enriched: true` -- if canonical fails, duplicates are lost
+- Using `author.username` instead of `authorId` for thread chain walk -- usernames are mutable handles, not stable identifiers
+- Walking the thread chain DOWN from ancestors instead of the bookmarked tweet -- ancestor-level branches can interfere with descent
+- Cleaning up wiki index/source entries for a merged file before writing `needs_canonical_recompile: true` -- crash between cleanup and flag-write loses the requeue obligation
+- Scanning the file body (not just frontmatter `source` field) for tweet URLs -- this can accidentally enrich manual files that merely reference tweets
