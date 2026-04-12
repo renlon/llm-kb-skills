@@ -555,11 +555,35 @@ If notebook was cleaned up or inaccessible:
 
 ### Cleanup Workflow
 
-_(To be populated in Task 4)_
+**Command:** `cleanup [--days N]`
+
+1. Read `notebooks` from state file
+
+2. For each notebook where `created` is older than N days (default `config.cleanup_days`, which defaults to 7):
+   - Confirm with user before first deletion, then batch the rest
+   - `notebooklm delete <notebook_id>`
+   - Remove from `notebooks` in state
+
+3. Also clean up `pending` or `failed` notebooks older than 1 day (likely orphaned)
+
+4. Prune `runs` older than `cleanup_days * 2`
+
+5. Write state (atomic)
 
 ### Status Workflow
 
-_(To be populated in Task 4)_
+**Command:** `status`
+
+1. Read state file
+
+2. Display formatted summary:
+   - Last podcast: cursor mtime + path (or "never" if null)
+   - Last digest: cursor mtime + path (or "never" if null)
+   - Last quiz: cursor mtime + path (or "never" if null)
+   - Active notebooks: count, list with status (pending/completed/failed)
+   - In-flight jobs: notebooks with `status: pending`
+   - Notebooks pending cleanup (older than `cleanup_days`)
+   - Total runs recorded
 
 ## Async Completion Model
 
@@ -631,8 +655,37 @@ The next skill invocation will detect the pending artifact via session recovery 
 
 ## Error Handling
 
-_(Section to be populated in Task 5)_
+| Error | Action |
+|-------|--------|
+| `notebooklm` not on PATH | Report: "notebooklm CLI not found. Install with `pip install notebooklm-py`." Stop. |
+| Auth check fails | Report: "NotebookLM auth expired. Run `notebooklm login`." Stop. |
+| `kb.yaml` missing notebooklm config | Report: "Add `integrations.notebooklm` to kb.yaml." Stop. |
+| State file missing | Create with empty defaults. Continue. |
+| State file corrupt | Back up to `.bak.<timestamp>`, warn user, re-initialize. Continue. |
+| Any source add fails | Mark notebook `failed`, report which source, stop. Do not advance watermark. (All-or-nothing) |
+| Any source enters `error` status | Mark notebook `failed`, report error, stop. Do not advance watermark. |
+| Source count exceeds limit | Truncate oldest-first to `max_sources_per_notebook`, log warning. |
+| Generation fails (rate limit) | Report to user, suggest retry in 5-10 min. Mark notebook `failed`. |
+| Artifact wait timeout | Report timeout, suggest `notebooklm artifact list`. Do not finalize state. |
+| Download fails | Check artifact status, report clearly. Do not finalize state. |
+| No files match selection | Report clearly, do not create empty notebook. |
+| Partial failure (quiz ok, flashcards failed) | Record per-artifact status. Watermark does NOT advance. Next run retries failed only. |
+| Session terminates mid-workflow | Notebook persisted as `pending`. Cleanup handles after 1 day. |
 
 ## Autonomy Rules
 
-_(Section to be populated in Task 6)_
+**Run without confirmation:**
+- File selection, filtering, and source count enforcement
+- `notebooklm auth check`
+- `notebooklm source list` / `notebooklm artifact list`
+- Reading `kb.yaml` and state file
+- Natural language routing and intent parsing
+- State file updates (after user-approved operations complete)
+- Downloading artifacts (after user approved generation)
+- Auto-cleanup of notebooks older than `cleanup_days` at the end of a workflow
+
+**Ask before running (single confirmation per workflow):**
+- The workflow confirmation prompt (step 7/8 in workflows) covers: notebook creation, source adding, artifact generation, waiting, downloading, and state update as a single approval
+- Explicit `cleanup` subcommand (confirm before first deletion)
+
+**Rationale:** The user approves the workflow once at the confirmation prompt. Everything after that is autonomous. This avoids repeated confirmation prompts per run.
