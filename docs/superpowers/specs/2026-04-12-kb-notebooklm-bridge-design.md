@@ -1,7 +1,7 @@
 # KB-NotebookLM Bridge Skill Design
 
 **Date:** 2026-04-12
-**Revision:** 5 (post peer-consensus round 3)
+**Revision:** 6 (post peer-consensus round 4)
 **Scope:** New skill `kb-notebooklm` for the `llm-kb-skills` plugin
 
 ## Problem
@@ -63,7 +63,7 @@ The skill also accepts free-text input and routes to the correct subcommand:
 | "clean", "delete old" | `cleanup` |
 | "status", "what's running" | `status` |
 
-Topic extraction: text after "about", "on", "for", "regarding" becomes `--topic`.
+Topic extraction: text after "about", "for", "regarding" becomes `--topic`. Note: "on" is excluded as a topic trigger because it causes false positives (e.g., "quiz me on this week's lessons" should route to `quiz` without a topic, not `quiz --topic "this week's lessons"`).
 
 Examples:
 - "make a podcast about attention" -> `podcast --topic attention`
@@ -106,9 +106,13 @@ Mutable state lives in a separate file at the KB project root (alongside `kb.yam
 **Path:** `<project_root>/.notebooklm-state.yaml`
 
 ```yaml
-last_podcast: "2026-04-12T14:30:00Z"    # ISO 8601 timestamp
-last_digest: "2026-04-11T09:00:00Z"
-last_quiz: "2026-04-10T16:45:00Z"
+last_podcast:                                # (mtime, path) tuple cursor
+  mtime: "2026-04-12T14:30:00Z"
+  path: "/Users/dragon/Documents/MLL/lessons/Word2vec_Embeddings_Training_2026-04-09.md"
+last_digest:
+  mtime: "2026-04-11T09:00:00Z"
+  path: "/Users/dragon/Documents/MLL/wiki/attention_mechanisms.md"
+last_quiz: null                              # null = include all files
 
 notebooks:
   - id: "abc123de-..."
@@ -124,9 +128,26 @@ runs:
     params_hash: "d4e5f6..."
     artifacts:
       - type: audio
-        output_file: /Users/dragon/Documents/MLL/output/podcast-2026-04-12.mp3
-        status: completed
+        output_files:
+          - /Users/dragon/Documents/MLL/output/podcast-2026-04-12.mp3
+        status: completed               # completed | failed
     notebook_id: "abc123..."
+
+  - workflow: quiz                       # example: quiz with multiple output files
+    timestamp: "2026-04-12T16:00:00Z"
+    sources_hash: "g7h8i9..."
+    params_hash: "j0k1l2..."
+    artifacts:
+      - type: quiz
+        output_files:
+          - /Users/dragon/Documents/MLL/output/quiz-2026-04-12.md
+          - /Users/dragon/Documents/MLL/output/quiz-2026-04-12.json
+        status: completed
+      - type: flashcards
+        output_files:
+          - /Users/dragon/Documents/MLL/output/flashcards-2026-04-12.md
+        status: failed                   # will be retried on next run
+    notebook_id: "def456..."
 ```
 
 **Timestamps:** All time values use ISO 8601 with timezone (`YYYY-MM-DDTHH:MM:SSZ`). Compared against filesystem mtime for incremental detection.
@@ -159,13 +180,17 @@ The dedup key is: `workflow type + sources_hash + params_hash`. This ensures tha
    - Sort by path
    - Join as `path:mtime\n` and compute SHA-256
 2. Compute `params_hash` from the workflow's generation parameters
-3. Search `runs` in state file for an entry matching `workflow + sources_hash + params_hash`
+3. Search `runs` in state file for an entry matching `workflow + sources_hash + params_hash` (includes `pending`, `completed`, and `failed` runs)
 4. If match found:
    - Check per-artifact status in the matched run record
-   - If all artifacts are `completed` and output files exist on disk -> skip, stop
-   - If any artifact is `failed` or output file missing -> proceed with **partial retry** (re-generate only failed/missing artifacts, reuse the existing notebook if still in state)
-   - Report what is being skipped vs re-generated
-5. If no match -> proceed with full generation
+   - If any artifact is `pending` (in-flight) -> **session recovery**: check artifact status via `notebooklm artifact list -n <notebook_id>`, then download if completed, re-wait if still in progress, or mark failed
+   - If all artifacts `completed` and all `output_files` exist on disk -> skip, stop
+   - If an artifact is `completed` but an output file is missing -> **re-download only** (use the existing notebook, no re-generation)
+   - If any artifact is `failed` -> **partial retry**: reuse the existing notebook (if still in state and accessible), skip completed artifacts, re-generate only failed ones
+   - Report what is being skipped vs re-generated vs re-downloaded
+5. If no match -> proceed with full generation (create new notebook)
+
+**Partial retry ordering:** When dedup triggers a partial retry, the workflow skips directly to the generation step for the failed artifact, using the `notebook_id` from the matched run record. It does NOT create a new notebook or re-add sources.
 
 **Same-day, different content:** If a lesson file is edited after a podcast was generated, its mtime changes, producing a different `sources_hash`. A new podcast is generated.
 
@@ -186,8 +211,16 @@ NotebookLM imposes per-notebook source limits (Standard: 50, Plus: 100). The `ma
 3. Log warning: "Selected N files but limited to <max> oldest-first. Remaining files will be included in the next run: [list]"
 4. Proceed with the truncated set
 
-**Watermark advancement:** `last_<workflow>` is set to the **newest mtime among the processed files** in the batch. This means:
-- All files in the current batch with mtime <= watermark are now "done"
+**Watermark cursor:** `last_<workflow>` stores a `(mtime, path)` tuple — the mtime and path of the last successfully processed file in sorted order. Selection filters using `(mtime, path) > last_<workflow>` (lexicographic comparison on the tuple). This eliminates the equal-mtime skip bug: files with the same mtime are disambiguated by path.
+
+```yaml
+last_podcast:
+  mtime: "2026-04-12T14:30:00Z"
+  path: "/Users/dragon/Documents/MLL/lessons/Word2vec_Embeddings_Training_2026-04-09.md"
+```
+
+After a successful batch:
+- The cursor advances to the `(mtime, path)` of the last file in the sorted batch
 - Files that exceeded the limit (newer than the batch) remain eligible for the next run
 
 **Source failure model: all-or-nothing.** If any source fails to add or reaches `error` status during processing, the entire run aborts. The notebook is marked `failed` in state (for cleanup), the watermark is NOT advanced, and no artifacts are generated. This prevents the watermark from skipping past failed files. The user is informed which source failed and can retry the entire run after investigating.
@@ -383,7 +416,8 @@ NotebookLM artifact generation is long-running (10-45 minutes). The skill uses t
 
 1. After `notebooklm generate ... --notebook <notebook_id> --json` returns, parse the response.
 2. Run `notebooklm artifact list --notebook <notebook_id> --json` to get the artifact ID and current status.
-3. Spawn a background subagent using the Agent tool with `run_in_background: true`. The subagent prompt:
+3. **Persist in-flight state:** Write a preliminary run record to state with artifact `status: pending` and the `notebook_id`, `artifact_id`, and expected `output_files`. This ensures that if the session terminates, a future invocation can detect the in-flight job via dedup and attempt to resume (check artifact status, re-download if completed, or re-wait).
+4. Spawn a background subagent using the Agent tool with `run_in_background: true`. The subagent prompt:
    ```
    Wait for the latest <type> artifact in notebook <notebook_id> to complete, then download.
    1. Run: notebooklm artifact wait <artifact_id> -n <notebook_id> --timeout <T>
@@ -392,8 +426,9 @@ NotebookLM artifact generation is long-running (10-45 minutes). The skill uses t
    4. If exit code 1 (error): Report error details.
    Report the outcome (success with file path, or failure with reason).
    ```
-4. The main conversation continues. The user is notified when the background agent completes.
-5. State finalization happens in the main conversation after the background agent reports success. The subagent does NOT write state.
+5. The main conversation continues. The user is notified when the background agent completes.
+6. State finalization happens in the main conversation after the background agent reports success: update artifact status from `pending` to `completed`, advance watermark. The subagent does NOT write state.
+7. **Session recovery:** If a future invocation finds a run with `status: pending`, it checks `notebooklm artifact list -n <notebook_id> --json`. If the artifact is `completed`, it downloads and finalizes. If still `in_progress`, it re-waits. If `failed`, it marks the run accordingly.
 
 ### Sync Artifacts
 
