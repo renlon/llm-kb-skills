@@ -339,7 +339,7 @@ Each workflow follows a common pattern: select source files from the KB, filter 
 
 5. **Compute hashes:** Calculate `sources_hash` (from file paths and mtimes) and `params_hash` (from difficulty, quantity, language).
 
-6. **Dedup check:** Search `state.runs` for matching `workflow + sources_hash + params_hash`. If match found, proceed to step 7 (partial-retry check). Otherwise continue to step 7.
+6. **Dedup check:** Search `state.runs` for matching `workflow + sources_hash + params_hash`. If match found, proceed to step 7 (partial-retry check). If no match, skip step 7 and continue to step 8.
 
 7. **Partial-retry check:** If dedup found a matching run, inspect per-artifact status:
    - If prior notebook accessible (exists in state and responds to `notebooklm artifact list -n <id>`): reuse notebook, skip to step 13 to generate only failed artifacts
