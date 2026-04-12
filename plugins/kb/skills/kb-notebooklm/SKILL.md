@@ -406,15 +406,152 @@ If notebook was cleaned up or inaccessible:
 
 ### Digest Workflow
 
-_(To be populated in Task 4)_
+**Command:** `digest`
+
+**Algorithm (14 steps):**
+
+1. **Glob wiki articles:** `glob` `config.wiki_path/**/*.md` (recursive)
+
+2. **Exclude index files:** Filter out `_index.md`, `_sources.md`, `_categories.md`, `_evolution.md`
+
+3. **Filter by watermark:** Select files where `(mtime, path) > state.last_digest`. If `last_digest` is null, include all files.
+
+4. **Sort and limit:** Sort by mtime ascending (oldest first), truncate to `config.max_sources_per_notebook` (default 45).
+
+5. **Compute hashes:** Calculate `sources_hash` (from file paths and mtimes) and `params_hash` (from language and instruction template).
+
+6. **Dedup check:** Search `state.runs` for matching `workflow + sources_hash + params_hash`. If match found, follow deduplication algorithm (session recovery, skip, re-download, or partial retry). Otherwise continue.
+
+7. **Handle empty selection:** If no files match after filtering, report "No wiki changes since last digest" and STOP.
+
+8. **Confirm with user:** "Will create a wiki digest podcast from N changed articles: [list titles or filenames]. Proceed?" Wait for user confirmation.
+
+9. **Create notebook:** Run `notebooklm create "MLL Wiki Digest YYYY-MM-DD" --json`, capture notebook ID from JSON response.
+
+10. **Persist notebook immediately:** Write notebook entry to state file with `status: pending`, `workflow: digest`, `created: <ISO timestamp>`, `id: <notebook_id>`.
+
+11. **Add sources (all-or-nothing):** For each selected wiki article, run `notebooklm source add <filepath> --notebook <notebook_id> --json`. If ANY source add fails: mark notebook as `failed` in state, report which source failed, STOP. Do NOT proceed to generation with partial sources.
+
+12. **Wait for sources ready:** Poll `notebooklm source list --notebook <notebook_id> --json` every 15 seconds until all sources have `status: ready` (timeout: 600 seconds). If any source reaches `status: error`, mark notebook as `failed` in state, report error details, STOP.
+
+13. **Generate audio:** Run `notebooklm generate audio "<instructions>" --language <config.language> --notebook <notebook_id> --json`.
+
+    **Audio instructions template:**
+    ```
+    Summarize the key changes and new knowledge in these wiki articles. Focus on what's new, why it matters, and how topics connect.
+    ```
+
+14. **Async completion (follow Async Completion Model):**
+    - Get artifact ID via `notebooklm artifact list --notebook <notebook_id> --json`
+    - Persist preliminary run record with artifact `status: pending`
+    - Spawn background agent to wait and download to `<output_path>/digest-YYYY-MM-DD.mp3`
+    - On background agent success (in main conversation after agent reports):
+      - Update artifact status to `completed`, add `output_files: [<absolute path>]`
+      - Update notebook status to `completed`
+      - **Advance watermark cursor:** Set `state.last_digest` to `{mtime: <last file mtime>, path: <last file path>}` where "last file" is the last file in the sorted batch (oldest-first order)
+      - Run auto-cleanup
+      - Write updated state to file
+
+**Session recovery:** If a future invocation finds a run with artifact `status: pending`, check artifact status via `notebooklm artifact list -n <notebook_id> --json`. If `completed`, download and finalize. If `in_progress`, re-wait. If `failed`, mark accordingly.
 
 ### Report Workflow
 
-_(To be populated in Task 4)_
+**Command:** `report [--topic X] [--format F]`
+
+**Algorithm (14 steps):**
+
+1. **Require topic:** `--topic` is required. If not provided, ask the user.
+
+2. **Search both lessons and wiki:** Search `config.lessons_path/**/*.md` and `config.wiki_path/**/*.md` (recursive) for topic string (case-insensitive) in both content and filenames using `grep`.
+
+3. **Exclude files:** Exclude `README.md` and index files (`_index.md`, `_sources.md`, `_categories.md`, `_evolution.md`).
+
+4. **Sort and limit:** Sort by mtime ascending (oldest first), truncate to `config.max_sources_per_notebook` (default 45).
+
+5. **Compute hashes:** Calculate `sources_hash` (from file paths and mtimes) and `params_hash` (from topic, format, language).
+
+6. **Dedup check:** Search `state.runs` for matching `workflow + sources_hash + params_hash`. If match found, follow deduplication algorithm (session recovery, skip, re-download, or partial retry). Otherwise continue.
+
+7. **Handle empty selection:** If no files match topic search, report "No content found for topic '<X>'" and STOP.
+
+8. **Confirm with user:** "Will generate a <format> report on '<topic>' from N files: [list titles or filenames]. Proceed?" Wait for user confirmation.
+
+9. **Create notebook:** Run `notebooklm create "MLL Report: <topic> YYYY-MM-DD" --json`, capture notebook ID from JSON response.
+
+10. **Persist notebook immediately:** Write notebook entry to state file with `status: pending`, `workflow: report`, `created: <ISO timestamp>`, `id: <notebook_id>`.
+
+11. **Add sources (all-or-nothing):** For each selected file, run `notebooklm source add <filepath> --notebook <notebook_id> --json`. If ANY source add fails: mark notebook as `failed` in state, report which source failed, STOP.
+
+12. **Wait for sources ready:** Poll `notebooklm source list --notebook <notebook_id> --json` every 15 seconds until all sources have `status: ready` (timeout: 600 seconds). If any source reaches `status: error`, mark notebook as `failed` in state, report error details, STOP.
+
+13. **Generate report:** Run `notebooklm generate report --format <F or briefing-doc> --language <config.language> --notebook <notebook_id> --append "Focus on the topic: <topic>" --json`.
+
+    **Format options:**
+    - Default: `briefing-doc`
+    - Other options: `study-guide`, `blog-post`, `custom`
+    - The `--append` parameter passes topic instructions to the generation template
+
+14. **Sync completion:** Wait inline (reports complete quickly, under 60 seconds):
+    - Get artifact ID via `notebooklm artifact list --notebook <notebook_id> --json`
+    - Run `notebooklm artifact wait <artifact_id> -n <notebook_id> --timeout 120`
+    - If success: download via `notebooklm download report <output_path>/report-<topic>-YYYY-MM-DD.md -n <notebook_id>`
+    - Update state: update artifact to `status: completed` with `output_files: [<absolute path>]`
+    - Update notebook to `completed`
+    - Append run record to `state.runs`
+    - **Do NOT advance any watermark** (reports are non-incremental)
+    - Run auto-cleanup
+    - Write updated state to file
+
+**Non-incremental workflow:** Report workflow does not use or advance a watermark cursor. Each invocation searches all matching content regardless of previous runs.
 
 ### Research-Audio Workflow
 
-_(To be populated in Task 4)_
+**Command:** `research-audio`
+
+**Algorithm (12 steps):**
+
+1. **Glob research reports:** `glob` `config.output_path/**/*report*.md` and `config.output_path/**/*research*.md`
+
+2. **Select most recent:** Sort by mtime descending, take the most recent file. If multiple files, optionally let user choose.
+
+3. **Compute hashes:** Calculate `sources_hash` (from file path and mtime) and `params_hash` (from language and instruction template).
+
+4. **Dedup check:** Search `state.runs` for matching `workflow + sources_hash + params_hash`. If match found, follow deduplication algorithm (session recovery, skip, re-download, or partial retry). Otherwise continue.
+
+5. **Handle empty selection:** If no research output files found, report "No research output found in <output_path>" and STOP.
+
+6. **Confirm with user:** "Will create an audio summary of: <filename>. Proceed?" Wait for user confirmation.
+
+7. **Create notebook:** Run `notebooklm create "MLL Research Audio YYYY-MM-DD" --json`, capture notebook ID from JSON response.
+
+8. **Persist notebook immediately:** Write notebook entry to state file with `status: pending`, `workflow: research-audio`, `created: <ISO timestamp>`, `id: <notebook_id>`.
+
+9. **Add sources (all-or-nothing):** Run `notebooklm source add <filepath> --notebook <notebook_id> --json`. If source add fails: mark notebook as `failed` in state, report error, STOP.
+
+10. **Wait for sources ready:** Poll `notebooklm source list --notebook <notebook_id> --json` every 15 seconds until source has `status: ready` (timeout: 600 seconds). If source reaches `status: error`, mark notebook as `failed` in state, report error details, STOP.
+
+11. **Generate audio:** Run `notebooklm generate audio "<instructions>" --language <config.language> --notebook <notebook_id> --json`.
+
+    **Audio instructions template:**
+    ```
+    Summarize these research findings. Cover key discoveries, methodology, and implications. Make it accessible.
+    ```
+
+12. **Async completion (follow Async Completion Model):**
+    - Get artifact ID via `notebooklm artifact list --notebook <notebook_id> --json`
+    - Persist preliminary run record with artifact `status: pending`
+    - Spawn background agent to wait and download to `<output_path>/research-audio-YYYY-MM-DD.mp3`
+    - On background agent success (in main conversation after agent reports):
+      - Update artifact status to `completed`, add `output_files: [<absolute path>]`
+      - Update notebook status to `completed`
+      - **Do NOT advance any watermark** (non-incremental workflow)
+      - Append run record to `state.runs`
+      - Run auto-cleanup
+      - Write updated state to file
+
+**Non-incremental workflow:** Research-audio workflow does not use or advance a watermark cursor. Each invocation selects the most recent research output regardless of previous runs.
+
+**Session recovery:** If a future invocation finds a run with artifact `status: pending`, check artifact status via `notebooklm artifact list -n <notebook_id> --json`. If `completed`, download and finalize. If `in_progress`, re-wait. If `failed`, mark accordingly.
 
 ### Cleanup Workflow
 
