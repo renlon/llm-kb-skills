@@ -35,7 +35,7 @@ This skill operates in two layers:
    ```bash
    which notebooklm
    ```
-   If not found, report: "NotebookLM CLI not installed. Run: `pip install notebooklm-cli` or follow instructions at [install docs]" and STOP.
+   If not found, report: "NotebookLM CLI not installed. Run: `pip install notebooklm-py`" and STOP.
 
 2. **Check authentication:**
    ```bash
@@ -95,12 +95,12 @@ When invoked via natural language, route to subcommands based on keywords:
 
 **ALWAYS** use explicit notebook specification:
 ```bash
-# CORRECT
-notebooklm --notebook <id> sources add file.md
-notebooklm -n <id> generate podcast
+# CORRECT — flag comes after the command
+notebooklm source add file.md --notebook <id>
+notebooklm generate audio "instructions" -n <id>
 
 # NEVER use
-notebooklm use <id>  # WRONG - state mutation
+notebooklm use <id>  # WRONG — writes to shared global context
 ```
 
 This ensures stateless operation and prevents cross-session contamination.
