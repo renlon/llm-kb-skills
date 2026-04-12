@@ -460,7 +460,7 @@ Some artifact types (mind-map, data-table, report, quiz, flashcards) complete re
 | Artifact wait timeout | Report timeout, suggest `notebooklm artifact list`. Do not finalize state. |
 | Download fails | Check artifact status, report clearly. Do not finalize state. |
 | No files match selection | Report clearly, do not create empty notebook. |
-| Partial failure (quiz ok, flashcards failed) | Record per-artifact status in run record. Watermark advances (sources were ok). Next run: dedup detects matching run, inspects per-artifact status, re-generates only failed artifact. |
+| Partial failure (quiz ok, flashcards failed) | Record per-artifact status in run record. Watermark does NOT advance (not all artifacts succeeded). Next run: dedup detects matching run, inspects per-artifact status, re-generates only failed artifact. |
 | Session terminates mid-workflow | Notebook persisted as `pending` in state. Cleanup will handle it after 1 day. |
 
 ## Autonomy Rules

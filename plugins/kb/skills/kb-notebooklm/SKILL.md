@@ -35,7 +35,7 @@ This skill operates in two layers:
    ```bash
    which notebooklm
    ```
-   If not found, report: "NotebookLM CLI not installed. Run: `pip install notebooklm-py`" and STOP.
+   If not found, report: "NotebookLM CLI not installed. Run: `pip install 'notebooklm-py[browser]'` and `playwright install chromium`" and STOP.
 
 2. **Check authentication:**
    ```bash
@@ -251,6 +251,16 @@ print(hashlib.sha256('\n'.join(entries).encode()).hexdigest())
 ## Workflows
 
 Each workflow follows a common pattern: select source files from the KB, filter by timestamps/topics, compute dedup hashes, create/reuse a notebook, add sources, generate artifacts, and track state. Incremental workflows (podcast, quiz, digest) use watermark cursors to process only new content. Topic-filtered workflows (report, research-audio) ignore watermarks and select all matching content.
+
+**Watermark advancement summary:**
+
+| Workflow | Advances Watermark? | Condition |
+|----------|---------------------|-----------|
+| podcast | Yes (unfiltered only) | All artifacts succeeded |
+| quiz | Yes (unfiltered only) | All artifacts succeeded |
+| digest | Yes | All artifacts succeeded |
+| report | Never | Non-incremental |
+| research-audio | Never | Non-incremental |
 
 ### Podcast Workflow
 
