@@ -325,7 +325,84 @@ Each workflow follows a common pattern: select source files from the KB, filter 
 
 ### Quiz Workflow
 
-_(To be populated in Task 4)_
+**Command:** `quiz [--topic X] [--difficulty D]`
+
+**Algorithm (16 steps):**
+
+1. **Glob lessons:** `glob` `config.lessons_path/**/*.md` (recursive), exclude `README.md`
+
+2. **Filter by watermark:** Select files where `(mtime, path) > state.last_quiz`. If `last_quiz` is null, include all files.
+
+3. **Filter by topic (if provided):** If `--topic` specified, further filter by grepping file content and filenames for the topic string (case-insensitive).
+
+4. **Sort and limit:** Sort by mtime ascending (oldest first), truncate to `config.max_sources_per_notebook` (default 45).
+
+5. **Compute hashes:** Calculate `sources_hash` (from file paths and mtimes) and `params_hash` (from difficulty, quantity, language).
+
+6. **Dedup check:** Search `state.runs` for matching `workflow + sources_hash + params_hash`. If match found, proceed to step 7 (partial-retry check). Otherwise continue to step 7.
+
+7. **Partial-retry check:** If dedup found a matching run, inspect per-artifact status:
+   - If prior notebook accessible (exists in state and responds to `notebooklm artifact list -n <id>`): reuse notebook, skip to step 13 to generate only failed artifacts
+   - If prior notebook gone: create new notebook (continue to step 9), re-add sources, generate only failed artifacts
+   - Report what is being retried (e.g., "Quiz completed previously, retrying flashcards only")
+
+8. **Handle empty selection:** If no files match after filtering, report "No new lessons since last quiz" and STOP.
+
+9. **Confirm with user:** "Will generate quiz + flashcards from N lessons: [list titles or filenames]. Proceed?" For partial retry: "Will retry failed artifact(s): [list]. Proceed?" Wait for user confirmation.
+
+10. **Create notebook (skip if reusing):** Run `notebooklm create "MLL Quiz YYYY-MM-DD" --json`, capture notebook ID from JSON response. Skip this step if reusing notebook from partial retry.
+
+11. **Persist notebook immediately (skip if reusing):** Write notebook entry to state file with `status: pending`, `workflow: quiz`, `created: <ISO timestamp>`, `id: <notebook_id>`. Skip this step if reusing notebook.
+
+12. **Add sources (skip if reusing):** For each selected lesson file, run `notebooklm source add <filepath> --notebook <notebook_id> --json`. If ANY source add fails: mark notebook as `failed` in state, report which source failed, STOP. Wait for sources ready via `notebooklm source list --notebook <notebook_id> --json` every 15 seconds until all sources have `status: ready` (timeout: 600 seconds). Skip this step if reusing notebook.
+
+13. **Generate quiz (skip if already `completed` in prior run):** Run `notebooklm generate quiz --difficulty <D or config.quiz.difficulty> --quantity <config.quiz.quantity> --language <config.language> --notebook <notebook_id> --json`. Wait inline via `notebooklm artifact wait <artifact_id> -n <notebook_id> --timeout 120`. Download quiz in both formats:
+    - `notebooklm download quiz --format markdown <output_path>/quiz-YYYY-MM-DD.md -n <notebook_id>`
+    - `notebooklm download quiz --format json <output_path>/quiz-YYYY-MM-DD.json -n <notebook_id>`
+    
+    **Topic filenames:** `quiz-<topic>-YYYY-MM-DD.md/.json`
+
+14. **Generate flashcards (skip if already `completed` in prior run):** Run `notebooklm generate flashcards --difficulty <D or config.quiz.difficulty> --quantity <config.quiz.quantity> --language <config.language> --notebook <notebook_id> --json`. Wait inline via `notebooklm artifact wait <artifact_id> -n <notebook_id> --timeout 120`. Download:
+    - `notebooklm download flashcards --format markdown <output_path>/flashcards-YYYY-MM-DD.md -n <notebook_id>`
+    
+    **Topic filename:** `flashcards-<topic>-YYYY-MM-DD.md`
+
+15. **Finalize state:** Run record with `artifacts` array:
+    ```yaml
+    artifacts:
+      - type: quiz
+        output_files:
+          - .../quiz-YYYY-MM-DD.md
+          - .../quiz-YYYY-MM-DD.json
+        status: completed
+      - type: flashcards
+        output_files:
+          - .../flashcards-YYYY-MM-DD.md
+        status: completed   # or "failed" if flashcard generation failed
+    ```
+    
+    **Watermark advancement rules:**
+    - If unfiltered AND all artifacts succeeded: advance `last_quiz` cursor to `{mtime: <last file mtime>, path: <last file path>}` where "last file" is the last file in the sorted batch (oldest-first order)
+    - If topic-filtered: do NOT advance `last_quiz`
+    - Update notebook to `completed` if all artifacts succeeded, or `failed` if any failed
+
+16. **Auto-cleanup:** Run cleanup workflow (see Cleanup Workflow).
+
+**Partial success behavior:**
+
+If quiz succeeds but flashcards fail (or vice versa):
+- Run record reflects per-artifact status
+- Watermark does NOT advance (not all artifacts succeeded)
+- On next invocation: same files selected, dedup matches, inspects per-artifact status, re-generates ONLY the failed artifact
+- Once all artifacts succeed, watermark advances
+
+**Notebook reuse on partial retry:**
+
+If the matched run's notebook is still accessible (exists in state and responds to `notebooklm artifact list -n <id>`):
+- Reuse notebook — skip creation and source upload (steps 10-12)
+
+If notebook was cleaned up or inaccessible:
+- Create new notebook and re-add sources before retrying (proceed through steps 10-12)
 
 ### Digest Workflow
 
