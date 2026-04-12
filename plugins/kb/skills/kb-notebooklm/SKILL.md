@@ -250,11 +250,78 @@ print(hashlib.sha256('\n'.join(entries).encode()).hexdigest())
 
 ## Workflows
 
-_(Section to be populated in Task 4)_
+Each workflow follows a common pattern: select source files from the KB, filter by timestamps/topics, compute dedup hashes, create/reuse a notebook, add sources, generate artifacts, and track state. Incremental workflows (podcast, quiz, digest) use watermark cursors to process only new content. Topic-filtered workflows (report, research-audio) ignore watermarks and select all matching content.
 
 ### Podcast Workflow
 
-_(To be populated in Task 4)_
+**Command:** `podcast [--topic X]`
+
+**Algorithm (17 steps):**
+
+1. **Glob lessons:** `glob` `config.lessons_path/**/*.md` (recursive), exclude `README.md`
+
+2. **Filter by watermark:** Select files where `(mtime, path) > state.last_podcast`. If `last_podcast` is null, include all files.
+
+3. **Filter by topic (if provided):** If `--topic` specified, further filter by grepping file content and filenames for the topic string (case-insensitive).
+
+4. **Sort and limit:** Sort by mtime ascending (oldest first), truncate to `config.max_sources_per_notebook` (default 45).
+
+5. **Compute hashes:** Calculate `sources_hash` (from file paths and mtimes) and `params_hash` (from format, length, language, instruction template).
+
+6. **Dedup check:** Search `state.runs` for matching `workflow + sources_hash + params_hash`. If match found, follow deduplication algorithm (session recovery, skip, re-download, or partial retry). Otherwise continue.
+
+7. **Handle empty selection:** If no files match after filtering, report "No new lessons since last podcast" and STOP.
+
+8. **Confirm with user:** "Will create a podcast from N lessons: [list titles or filenames]. Proceed?" Wait for user confirmation.
+
+9. **Create notebook:** Run `notebooklm create "MLL Podcast YYYY-MM-DD" --json`, capture notebook ID from JSON response.
+
+10. **Persist notebook immediately:** Write notebook entry to state file with `status: pending`, `workflow: podcast`, `created: <ISO timestamp>`, `id: <notebook_id>`.
+
+11. **Add sources (all-or-nothing):** For each selected lesson file, run `notebooklm source add <filepath> --notebook <notebook_id> --json`. If ANY source add fails: mark notebook as `failed` in state, report which source failed, STOP. Do NOT proceed to generation with partial sources.
+
+12. **Wait for sources ready:** Poll `notebooklm source list --notebook <notebook_id> --json` every 15 seconds until all sources have `status: ready` (timeout: 600 seconds). If any source reaches `status: error`, mark notebook as `failed` in state, report error details, STOP.
+
+13. **Generate audio:** Run `notebooklm generate audio "<instructions>" --format <config.podcast.format> --length <config.podcast.length> --language <config.language> --notebook <notebook_id> --json`.
+
+    **Audio instructions template:**
+    ```
+    Cover the key concepts from these lessons: [comma-separated lesson titles]. Make it engaging and educational. Highlight connections between topics where they exist. Target audience: someone learning ML/AI concepts.
+    ```
+
+14. **Get artifact ID:** Run `notebooklm artifact list --notebook <notebook_id> --json`, extract artifact ID and status from response.
+
+15. **Persist preliminary run record:** Write run entry to `state.runs` with:
+    - `workflow: podcast`
+    - `timestamp: <ISO timestamp>`
+    - `sources_hash: <computed hash>`
+    - `params_hash: <computed hash>`
+    - `notebook_id: <notebook_id>`
+    - `artifacts: [{type: audio, status: pending, output_files: []}]`
+
+16. **Spawn background agent:** Use Agent tool with `run_in_background: true` to wait and download:
+    ```
+    Wait for artifact <artifact_id> in notebook <notebook_id> to complete, then download.
+    1. Run: notebooklm artifact wait <artifact_id> -n <notebook_id> --timeout 2700
+    2. If exit code 0: Run: notebooklm download audio <output_path>/<filename> -n <notebook_id>
+    3. If exit code 2 (timeout): Report timeout
+    4. If exit code 1 (error): Report error details
+    Report the outcome (success with file path, or failure with reason).
+    ```
+
+    **Output filename logic:**
+    - If unfiltered: `podcast-YYYY-MM-DD.mp3`
+    - If topic-filtered: `podcast-<topic>-YYYY-MM-DD.mp3`
+    - Saved to `config.output_path`
+
+17. **On background agent success (in main conversation after agent reports):**
+    - Update artifact in run record: `status: completed`, add `output_files: [<absolute path>]`
+    - Update notebook: `status: completed`
+    - **Advance watermark cursor (if unfiltered run and all artifacts OK):** Set `state.last_podcast` to `{mtime: <last file mtime>, path: <last file path>}` where "last file" is the last file in the sorted batch (oldest-first order)
+    - Run auto-cleanup (see Cleanup Workflow)
+    - Write updated state to file
+
+**Session recovery:** If a future invocation finds a run with artifact `status: pending`, check artifact status via `notebooklm artifact list -n <notebook_id> --json`. If `completed`, download and finalize. If `in_progress`, re-wait. If `failed`, mark accordingly.
 
 ### Quiz Workflow
 
@@ -279,6 +346,74 @@ _(To be populated in Task 4)_
 ### Status Workflow
 
 _(To be populated in Task 4)_
+
+## Async Completion Model
+
+Long-running artifact generation (podcast audio, digest audio, research audio) takes 10-45 minutes to complete. These workflows use the Claude Code Agent tool with `run_in_background: true` to avoid blocking the main conversation.
+
+### CLI Contract
+
+The `notebooklm` CLI provides these commands for async artifact management:
+
+- `notebooklm generate <type> ... --json` - Initiates artifact generation, returns immediately
+- `notebooklm artifact list --notebook <notebook_id> --json` - Lists artifacts with ID and status
+- `notebooklm artifact wait <artifact_id> -n <notebook_id> --timeout <seconds>` - Blocks until artifact completes or timeout
+- `notebooklm download <type> <output_path> -n <notebook_id>` - Downloads completed artifact
+
+For async artifacts (audio, video), the generate command returns immediately. Use `artifact list` to get the artifact ID and status, then `artifact wait` to block until completion.
+
+### Async Flow (7 steps)
+
+1. **Initiate generation:** Run `notebooklm generate <type> "<instructions>" --format <format> --length <length> --language <language> --notebook <notebook_id> --json`. The command returns immediately (non-blocking).
+
+2. **Get artifact ID:** Run `notebooklm artifact list --notebook <notebook_id> --json` to extract the artifact ID and initial status from the response.
+
+3. **Persist in-flight state:** Write preliminary run record to state file with artifact `status: pending` and `notebook_id`. This enables session recovery if the current session ends before completion.
+
+4. **Spawn background subagent:** Use Agent tool with `run_in_background: true`:
+   ```
+   Wait for artifact <artifact_id> in notebook <notebook_id> to complete, then download.
+   1. Run: notebooklm artifact wait <artifact_id> -n <notebook_id> --timeout 2700
+   2. If exit code 0: Run: notebooklm download <type> <output_path>/<filename> -n <notebook_id>
+   3. If exit code 2 (timeout): Report timeout
+   4. If exit code 1 (error): Report error details
+   Report the outcome (success with file path, or failure with reason).
+   ```
+
+5. **Main conversation continues:** User is notified when the background agent completes. No blocking.
+
+6. **State finalization (in main conversation after background agent reports success):**
+   - Update artifact status to `completed`
+   - Add `output_files: [<absolute path>]` to artifact record
+   - Update notebook status to `completed`
+   - Advance watermark cursor if applicable (unfiltered incremental workflows only)
+   - Write updated state to file
+   - The subagent does NOT write state — only the main conversation updates state.
+
+7. **Session recovery:** If a future invocation finds a run with artifact `status: pending`, check `notebooklm artifact list -n <notebook_id> --json`. If artifact is `completed`, download and finalize state. If `in_progress`, re-wait with new background agent. If `failed`, mark artifact and notebook as `failed` in state.
+
+### Sync Artifacts
+
+Quiz, flashcards, report, mind-map, and data-table artifacts complete quickly (under 60 seconds). These workflows wait inline without background agents:
+
+1. Run `notebooklm generate <type> ... -n <notebook_id> --json`
+2. Run `notebooklm artifact list -n <notebook_id> --json` to get artifact ID
+3. Run `notebooklm artifact wait <artifact_id> -n <notebook_id> --timeout 120`
+4. If success: download immediately via `notebooklm download <type> <output_path> -n <notebook_id>`
+5. Update state with `status: completed` and output file path
+
+No background agent needed. User waits for completion before proceeding.
+
+### Fallback for Session Ending
+
+If the session is ending (user says "goodbye" or closes the session) and an async artifact is in-flight, skip the background agent. Instead, report the artifact ID and notebook ID for manual download:
+
+```
+Artifact generation in progress. To download when complete:
+notebooklm download <type> <output_path> -n <notebook_id>
+```
+
+The next skill invocation will detect the pending artifact via session recovery and complete the download automatically.
 
 ## Error Handling
 
