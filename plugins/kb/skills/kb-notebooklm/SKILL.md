@@ -107,11 +107,146 @@ This ensures stateless operation and prevents cross-session contamination.
 
 ## State Management
 
-_(Section to be populated in Task 2)_
+**State file location:** `<project_root>/.notebooklm-state.yaml` (alongside `kb.yaml`)
+
+**State schema:**
+```yaml
+last_podcast:                    # (mtime, path) tuple cursor, or null
+  mtime: "2026-04-12T14:30:00.123456Z"
+  path: "/path/to/last/processed/file.md"
+last_digest: null
+last_quiz: null
+
+notebooks:                       # tracked for cleanup
+  - id: "notebook-uuid"
+    title: "MLL Podcast 2026-04-12"
+    created: "2026-04-12T14:30:00.123456Z"
+    workflow: podcast
+    status: pending              # pending | completed | failed
+
+runs:                            # dedup history
+  - workflow: podcast
+    timestamp: "2026-04-12T14:30:00.123456Z"
+    sources_hash: "sha256..."
+    params_hash: "sha256..."
+    artifacts:
+      - type: audio
+        output_files:
+          - /path/to/podcast-2026-04-12.mp3
+        status: completed        # pending | completed | failed
+    notebook_id: "notebook-uuid"
+```
+
+**Reading state:**
+```bash
+python3 -c "
+import yaml, json, sys
+try:
+    with open('.notebooklm-state.yaml') as f:
+        state = yaml.safe_load(f) or {}
+    print(json.dumps(state, default=str))
+except FileNotFoundError:
+    print('{}')
+except yaml.YAMLError as e:
+    print(json.dumps({'error': str(e)}))
+    sys.exit(1)
+"
+```
+
+**Writing state (atomic write via temp file + mv):**
+```bash
+python3 -c "
+import yaml, json, tempfile, shutil, sys, os
+state = json.loads(sys.stdin.read())
+state_path = '.notebooklm-state.yaml'
+state_dir = os.path.dirname(os.path.abspath(state_path)) or '.'
+with tempfile.NamedTemporaryFile(mode='w', dir=state_dir, suffix='.tmp', delete=False) as f:
+    yaml.dump(state, f, default_flow_style=False, allow_unicode=True)
+    tmp = f.name
+shutil.move(tmp, state_path)
+" <<< '<json-encoded-state>'
+```
+
+**Corrupt state recovery:** Backup to `.notebooklm-state.yaml.bak.<ISO-timestamp>`, warn user, re-initialize empty state.
+
+**Pruning:** On every write, remove `runs` entries older than `cleanup_days * 2` (default 60 days).
+
+**Concurrency:** Single-writer only. One MLL operation at a time. This is a known limitation.
 
 ## Deduplication
 
-_(Section to be populated in Task 3)_
+**Dedup key:** `workflow + sources_hash + params_hash`
+
+**Computing `sources_hash`:**
+```bash
+python3 -c "
+import hashlib, json, os, sys
+files = json.loads(sys.stdin.read())  # list of file paths
+entries = []
+for f in sorted(files):
+    mtime = os.path.getmtime(f)
+    entries.append(f'{f}:{mtime}')
+print(hashlib.sha256('\n'.join(entries).encode()).hexdigest())
+" <<< '["file1.md", "file2.md"]'
+```
+
+**Computing `params_hash` (per workflow):**
+- **podcast:** `format + length + language + instruction_template`
+- **quiz:** `difficulty + quantity + language`
+- **digest:** `language + instruction_template`
+- **report:** `topic + format + language`
+- **research-audio:** `language + instruction_template`
+
+**Deduplication algorithm (5 steps):**
+
+1. **Compute `sources_hash`:** For each selected file, get path and mtime (ISO 8601), sort by path, join as `path:mtime\n`, SHA-256 hash.
+
+2. **Compute `params_hash`:** From workflow's generation parameters (see above).
+
+3. **Search `runs` in state:** Look for matching `workflow + sources_hash + params_hash` (includes pending, completed, failed).
+
+4. **If match found:**
+   - **If any artifact `pending` (in-flight):** Session recovery. Check artifact status via `notebooklm artifact list -n <notebook_id>`. Download if completed, re-wait if still in progress, or mark failed.
+   - **If all artifacts `completed` and all `output_files` exist on disk:** Skip generation, report what was skipped, STOP.
+   - **If artifact `completed` but output file missing:** Re-download only (use existing notebook, no re-generation).
+   - **If any artifact `failed`:** Partial retry: reuse existing notebook if still accessible, skip completed artifacts, re-generate only failed ones. If notebook gone, recreate and re-add sources.
+   - **Report** what is being skipped vs re-generated vs re-downloaded.
+
+5. **If no match:** Proceed with full generation (new notebook).
+
+**Partial retry:** Reuse existing notebook if accessible, skip completed artifacts, re-generate only failed ones. If notebook no longer accessible, recreate notebook and re-add sources.
+
+## Source Count Limits
+
+**Selection order:** Oldest-first. Incremental workflows sort by mtime ascending, take first `max_sources_per_notebook` (default 50, configurable in `kb.yaml`).
+
+**When files exceed limit:**
+1. Sort all matching files oldest-first (by mtime ascending)
+2. Take first `max_sources_per_notebook` files
+3. Log warning: "Found N files, limit is M. Processing oldest M files. Remaining files will be processed in next run."
+4. Proceed with truncated set
+
+**Watermark cursor rules:**
+- **Cursor structure:** `last_<workflow>` stores `(mtime, path)` tuple, not just timestamp
+- **Filter rule:** Select files where `(mtime, path) > last_<workflow>` (lexicographic comparison)
+- **Why tuple cursor:** Eliminates equal-mtime skip bug. When multiple files share same mtime, path breaks the tie.
+- **After successful batch:** Cursor advances to `(mtime, path)` of last file in the sorted batch (oldest-first order)
+- **Example:**
+  ```yaml
+  last_podcast:
+    mtime: "2026-04-12T14:30:00.123456Z"
+    path: "/kb/lessons/lesson-042.md"
+  ```
+  Next run will process files where `(mtime, path) > ("2026-04-12T14:30:00.123456Z", "/kb/lessons/lesson-042.md")`
+
+**Source failure model:**
+- **All-or-nothing:** Any source failure aborts entire run
+- **On source failure:**
+  - Mark notebook status as `failed` in state
+  - Do NOT advance watermark cursor
+  - Do NOT generate artifacts
+  - Report which source failed and why
+- **Rationale:** Partial source sets produce incomplete artifacts. Better to fail loudly and retry with full source set.
 
 ## Workflows
 
