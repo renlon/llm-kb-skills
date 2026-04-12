@@ -171,11 +171,23 @@ Downloads images, videos, and PDFs from tweets for vault-level preservation. Med
 
 ### Incremental Detection
 
+**Capture compile-start timestamp** before any other work in the compile workflow (before Phase 0). Store in memory as `compile_start_ts` (ISO 8601 with maximum available precision, e.g. fractional seconds). This timestamp will be written to `kb.yaml` in Phase 4.
+
+If the user said "full compile", treat `last_compiled_at` as missing for this run (full-scan mode). Do not delete the field from `kb.yaml`.
+
 1. Read `wiki/_index.md` (lists every raw source with its last-compiled hash)
 2. Scan `raw/` recursively with Glob
 3. Scan each `external_sources` path from `kb.yaml` (if any). Prefix entries in the index with `external:<label>/` to distinguish them from `raw/` sources.
-4. Diff against index: identify **new**, **changed**, and **deleted** sources
-5. Only process what changed -- never recompile the entire source tree
+4. **Categorize without hashing:**
+   - **New files:** In glob but not in `_index.md` -- add to process list directly. No hash needed at detection time.
+   - **Deleted files:** In `_index.md` but not in glob -- flag for review.
+   - **Existing files:** In both glob and `_index.md` -- proceed to mtime check (step 5).
+5. **mtime pre-filter for existing files:**
+   - Read `last_compiled_at` from `kb.yaml`. If missing, unparseable, or in the future -- fall back to full-scan mode: hash ALL existing files against the index (skip the mtime check).
+   - For each existing file, compare file mtime against `last_compiled_at` using inclusive comparison (`>=`):
+     - **mtime strictly older:** Skip -- file hasn't changed since last compile. No hash computation.
+     - **mtime >= `last_compiled_at`:** Hash the file, compare against stored hash in `_index.md`. If different -- add to process list as "changed". If same -- skip (touched but content unchanged).
+   - Log: "Incremental detection: N new, M changed, D deleted (K files skipped via mtime)"
 6. **Handle `enriched: merged` files** (state-derived, restart-safe): For each file in `raw/articles/x/` with `enriched: merged` in frontmatter:
 
    a. **Validate `canonical_file`:** Read the merged file's `canonical_file` frontmatter (vault-relative path like `raw/articles/x/name.md`). Valid if ALL of: (1) path is under `raw/articles/x/`, (2) file exists, (3) target has `enriched: true`, (4) target's `thread_dedup_key` matches merged file's `thread_dedup_key`.
@@ -322,6 +334,8 @@ After every compile, update these files:
 - **`wiki/_sources.md`** -- mapping from raw sources to wiki articles they contributed to
 - **`wiki/_categories.md`** -- auto-maintained category tree reflecting folder structure
 - **`wiki/_evolution.md`** -- append-only log of auto-evolve actions: `date | trigger | action | articles affected`
+- **Hash at read time:** When writing source hashes to `_index.md`, use the hash computed when the file was read for extraction (Phase 2), NOT a re-read of the file at Phase 4. This prevents stale-output bugs if a file is edited during compile. For failed files, do NOT update their hash in `_index.md` -- leave the old hash so they appear "changed" on the next run.
+- **Write `last_compiled_at`:** Write the `compile_start_ts` (captured before Phase 0) to `kb.yaml` as `last_compiled_at` (ISO 8601 with maximum available precision). This advances the mtime baseline for the next compile. Write this even if some files failed -- failed files are protected by their stale hash in `_index.md`.
 - **Clear `needs_canonical_recompile`:** After all wiki changes are ready, scan `raw/articles/x/` for files with `needs_canonical_recompile: true`. For each, remove the field from frontmatter. Stage these changes alongside all other Phase 4 changes so they are included in the same commit. This ensures the one-shot requeue flag is cleared atomically with the compile results.
 
 ## Workflow 2: Query
@@ -479,3 +493,5 @@ And knowledge files with YAML frontmatter in `knowledge/articles/` or `knowledge
 - Walking the thread chain DOWN from ancestors instead of the bookmarked tweet -- ancestor-level branches can interfere with descent
 - Cleaning up wiki index/source entries for a merged file before writing `needs_canonical_recompile: true` -- crash between cleanup and flag-write loses the requeue obligation
 - Scanning the file body (not just frontmatter `source` field) for tweet URLs -- this can accidentally enrich manual files that merely reference tweets
+- Using compile-end time instead of compile-start time for `last_compiled_at` -- files modified during a long compile would be missed on the next run
+- Hashing a source file at Phase 4 instead of when it's read for extraction -- if the file was edited during compile, the stored hash won't match the compiled content, and the next run will skip a stale compilation
