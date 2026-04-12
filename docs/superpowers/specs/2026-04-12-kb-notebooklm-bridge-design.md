@@ -150,7 +150,7 @@ runs:
     notebook_id: "def456..."
 ```
 
-**Timestamps:** All time values use ISO 8601 with timezone (`YYYY-MM-DDTHH:MM:SSZ`). Compared against filesystem mtime for incremental detection.
+**Timestamps:** All time values use ISO 8601 with fractional seconds and timezone (`YYYY-MM-DDTHH:MM:SS.ffffffZ`). Filesystem mtime is read at full precision available from `os.path.getmtime()` (typically microsecond on macOS/Linux). This ensures the `(mtime, path)` cursor doesn't lose precision at second boundaries.
 
 **State file writes:** The LLM agent reads the full file, modifies in memory, and writes the entire file back atomically (write to `.notebooklm-state.yaml.tmp`, then `mv` to `.notebooklm-state.yaml`). Background subagents do NOT write state — they report results back to the main conversation, which then writes state.
 
@@ -251,7 +251,7 @@ Notebooks are persisted to state **immediately after creation** with `status: pe
 
 ### Watermark Rules
 
-**Unfiltered runs** (`podcast`, `quiz`, `digest` without `--topic`): advance the global `last_<workflow>` watermark to the newest mtime of successfully processed files.
+**Unfiltered runs** (`podcast`, `quiz`, `digest` without `--topic`): advance the global `last_<workflow>` cursor to the `(mtime, path)` of the last file in the sorted batch. Only advance when **all** artifacts for the batch succeed.
 
 **Topic-filtered runs** (`podcast --topic X`, `quiz --topic X`): do **NOT** advance the global watermark. A topic-filtered run only processes a subset of eligible files. Advancing the global watermark would permanently skip unrelated files that were newer than the old watermark but not matched by the topic filter. Topic-filtered runs rely solely on dedup to prevent re-generation.
 
@@ -276,7 +276,7 @@ Notebooks are persisted to state **immediately after creation** with `status: pe
 14. **Long wait — use Agent tool** (see Async Completion Model below)
     - Output filename: `podcast-YYYY-MM-DD.mp3` or `podcast-<topic>-YYYY-MM-DD.mp3` if topic-filtered
 15. On success, finalize state:
-    - If unfiltered: set `last_podcast` to newest mtime among successfully added sources
+    - If unfiltered and all artifacts succeeded: advance `last_podcast` cursor to `(mtime, path)` of the last file in the sorted batch
     - If topic-filtered: do NOT advance `last_podcast`
     - Update notebook status to `completed`, append to `runs` with final `sources_hash` and `params_hash`
 16. Run auto-cleanup: delete notebooks where `created` is older than `cleanup_days`
@@ -291,12 +291,15 @@ Notebooks are persisted to state **immediately after creation** with `status: pe
 4. Sort by mtime ascending (oldest first), enforce source count limit
 5. Run dedup check
 6. If no files match -> report "No new lessons since last quiz" and stop
-7. **Confirm with user:** "Will generate quiz + flashcards from N lessons: [list]. Proceed?"
-8. Create notebook: `notebooklm create "MLL Quiz YYYY-MM-DD" --json`
-9. **Immediately persist** notebook to state file with `status: pending`
-10. Add sources with `--notebook <notebook_id>` (same all-or-nothing error handling as podcast)
-11. Wait for sources to be ready (same as podcast — any source error aborts the run)
-12. **Check for partial-retry:** If dedup found a matching run with per-artifact status, check which artifacts are `completed` vs `failed`. Skip generation/download for completed artifacts and only process failed ones. If no prior run, generate both.
+7. **Check for partial-retry:** If dedup found a matching run (step 5), check per-artifact status. If retrying:
+   - If the prior run's notebook is still accessible: reuse it (skip to step 13, generating only failed artifacts)
+   - If the prior run's notebook is gone: proceed with new notebook creation (step 8), then generate only failed artifacts
+   - Report: "Retrying failed artifact(s): [list]. Reusing existing notebook: [yes/no]"
+8. **Confirm with user:** "Will generate quiz + flashcards from N lessons: [list]. Proceed?" (or for partial retry: "Will retry failed artifact(s): [list]. Proceed?")
+9. Create notebook: `notebooklm create "MLL Quiz YYYY-MM-DD" --json` (skip if reusing)
+10. **Immediately persist** notebook to state file with `status: pending` (skip if reusing)
+11. Add sources with `--notebook <notebook_id>` (same all-or-nothing error handling as podcast; skip if reusing)
+12. Wait for sources to be ready (same as podcast — any source error aborts the run; skip if reusing)
 13. **Generate quiz** (skip if already `completed` in a prior partial run):
     - `notebooklm generate quiz --difficulty <D or config.quiz.difficulty> --quantity <config.quiz.quantity> --language <config.language> --notebook <notebook_id> --json`
     - Wait for completion, then download:
@@ -313,19 +316,24 @@ Notebooks are persisted to state **immediately after creation** with `status: pe
       ```yaml
       artifacts:
         - type: quiz
-          output_file: .../quiz-YYYY-MM-DD.json
+          output_files:
+            - .../quiz-YYYY-MM-DD.md
+            - .../quiz-YYYY-MM-DD.json
           status: completed
         - type: flashcards
-          output_file: .../flashcards-YYYY-MM-DD.md
+          output_files:
+            - .../flashcards-YYYY-MM-DD.md
           status: completed   # or "failed" if flashcard generation failed
       ```
-    - If unfiltered: set `last_quiz` to newest mtime of successfully added sources
+    - If unfiltered and all artifacts succeeded: advance `last_quiz` cursor to `(mtime, path)` of last file in batch
     - If topic-filtered: do NOT advance `last_quiz`
     - Update notebook status to `completed` if all artifacts succeeded, or `failed` if any artifact failed
     - Partial success is tracked only at the artifact level within the run record, not at the notebook level
 16. Run auto-cleanup
 
-**Partial success:** If quiz succeeds but flashcards fail (or vice versa), the run record reflects per-artifact status. The watermark still advances (the sources were processed). On the next invocation, dedup checks against the `sources_hash + params_hash`; since the params haven't changed and sources are the same, the run matches — but the skill checks per-artifact status and only re-generates the failed artifact.
+**Partial success:** If quiz succeeds but flashcards fail (or vice versa), the run record reflects per-artifact status. The watermark does **NOT** advance (not all artifacts succeeded). On the next invocation, file selection still includes the same files, dedup matches the `sources_hash + params_hash`, inspects per-artifact status, and re-generates only the failed artifact. Once all artifacts succeed, the watermark advances.
+
+**Notebook reuse on partial retry:** If the matched run's notebook is still accessible (exists in `notebooks` state and responds to `notebooklm artifact list -n <id>`), the skill reuses it — skipping notebook creation and source upload. If the notebook was cleaned up or is inaccessible, the skill creates a new notebook and re-adds sources before retrying the failed artifact.
 
 ### `digest`
 
@@ -342,7 +350,7 @@ Notebooks are persisted to state **immediately after creation** with `status: pe
 11. Wait for sources to be ready (any source error aborts the run)
 13. `notebooklm generate audio "Summarize the key changes and new knowledge in these wiki articles. Focus on what's new, why it matters, and how topics connect." --language <config.language> --notebook <notebook_id> --json`
 14. Wait and download to `<output_path>/digest-YYYY-MM-DD.mp3` (via subagent)
-15. Finalize state: set `last_digest` to newest mtime of successfully added sources, update notebook to `completed`, append run
+15. Finalize state: advance `last_digest` cursor to `(mtime, path)` of last file in batch, update notebook to `completed`, append run
 16. Run auto-cleanup
 
 ### `report [--topic X] [--format F]`
