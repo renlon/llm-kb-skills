@@ -13,7 +13,7 @@
 ## Skills
 
 - `kb-init` -- One-time setup to bootstrap a new knowledge base.
-- `kb` -- Main operating skill with four workflows: compile, query, lint, evolve.
+- `kb` -- Main operating skill with four workflows: compile (with X enrichment Phase 0), query, lint, evolve.
 - `research` -- Initial research outline generation.
 - `research-deep` -- Deep research via independent agents per outline item.
 - `research-add-fields` -- Add field definitions to an existing research outline.
