@@ -43,7 +43,6 @@ integrations:
       api_delay_ms: 1000         # delay between bird API calls in ms (default: 1000)
     browser: chrome              # cookie source for bird CLI auth
     browser_profile: null        # optional, for multi-profile browsers
-    media_dir: media/x           # vault-level media storage (outside raw/)
 ```
 
 When `integrations.x.enrich` is present, compile runs Phase 0 (X Enrichment) before Incremental Detection. If the section is missing or both toggles are `false`, Phase 0 is skipped entirely.
@@ -85,7 +84,7 @@ Enriches raw tweet files before compilation. Stitches same-author self-threads a
 
 **Config check (first -- zero side effects):**
 
-1. Read `integrations.x` from `kb.yaml`. If `enabled` is false or `enrich` section missing --> skip Phase 0.
+1. Read `integrations.x` from `kb.yaml`. If `enabled` is explicitly `false` (absent defaults to `true`) or `enrich` section missing --> skip Phase 0.
 2. If both `enrich.threads` and `enrich.media` are `false` --> log "X enrichment: both threads and media disabled -- skipping" and skip Phase 0. No bird CLI check, no auth, no file scan.
 
 **Guards (only if at least one enrich toggle is true):**
@@ -104,7 +103,7 @@ Enriches raw tweet files before compilation. Stitches same-author self-threads a
 
 **Path A -- Threads enabled** (`enrich.threads: true`, the default):
 
-9. For each selected candidate, fetch thread: `bird thread <tweet-id> --json --all <bird-auth>`. The response is `{ "tweets": [...] }` -- access the array via `.tweets`. Insert `enrich.api_delay_ms` (default: 1000ms) delay between calls.
+9. For each selected candidate, fetch thread: `bird thread <tweet-id> --json --all <bird-auth>`. The response is `{ "tweets": [...] }` -- access the array via `.tweets`. Insert `enrich.api_delay_ms` (default: 1000ms) delay between calls. Note: PDF detection may require an additional `--json-full` call per candidate (see Media Download step 6) -- apply the same delay before that call.
 10. **Walk the self-thread chain** for each candidate:
     - Record the bookmarked tweet's `authorId` (top-level string field) as the target author.
     - **Walk UP:** From the bookmarked tweet, follow `inReplyToStatusId` links collecting tweets where `authorId` matches the target. Stop at a different author or the conversation root.
@@ -124,13 +123,13 @@ Enriches raw tweet files before compilation. Stitches same-author self-threads a
       <!-- /enrich:thread -->
       ```
     - If `enrich.media: true`, download media from all tweets in the chain (see Media Download below).
-    - Set frontmatter: `thread_dedup_key`, `thread_root_id`, `thread_leaf_id`, `conversation_id`, `thread_length`, `enriched: true`, `enriched_at` (ISO 8601).
+    - Set frontmatter: `thread_dedup_key`, `thread_root_id`, `thread_leaf_id`, `conversation_id` (from tweet's `conversationId` field), `thread_length`, `enriched: true`, `enriched_at` (ISO 8601).
     - On any failure (bird non-zero exit, bookmarked tweet missing from response, required parent missing during chain walk) --> set `enriched: failed`, continue to next candidate.
 15. **Finalize dedup:** For each within-run group whose canonical succeeded (`enriched: true`), mark non-canonicals `enriched: merged` with `canonical_file` (vault-relative path) and `thread_dedup_key`. If canonical failed, leave duplicates unchanged (eligible for retry).
 
 **Path B -- Media only** (`enrich.threads: false` AND `enrich.media: true`):
 
-16. For each selected candidate, fetch single tweet: `bird read <tweet-id> --json <bird-auth>`. Insert `api_delay_ms` delay between calls.
+16. For each selected candidate, fetch single tweet: `bird read <tweet-id> --json <bird-auth>`. Insert `api_delay_ms` delay between calls. Note: PDF detection may require an additional `--json-full` call (see Media Download step 6) -- apply the same delay before that call.
 17. Write identity fields: `thread_dedup_key: "<tweet_id>:<tweet_id>"`, `thread_root_id`, `thread_leaf_id` (all equal to the tweet ID). No thread stitching, no dedup.
 18. Download media from the bookmarked tweet only (see Media Download below).
 19. Set frontmatter: `enriched: true`, `enriched_at` (ISO 8601), identity fields. On failure --> `enriched: failed`.
@@ -157,7 +156,7 @@ Downloads images, videos, and PDFs from tweets for vault-level preservation. Med
    - Videos: file > 10KB
    - If validation fails: delete file, log warning, skip that media item
 5. **Video size guard:** Before downloading videos, send `curl -sfLI <url>` to check `Content-Length`. If exceeds `enrich.video_max_mb` (default: 100MB), skip and log as text link. If header absent, download with `--max-filesize`. After download, verify file size on disk -- delete if over limit.
-6. **PDF detection:** To find linked PDFs, re-fetch the tweet with `--json-full` and parse `_raw.legacy.entities.urls[].expanded_url`. There is no `links` field on bird responses -- expanded URLs are only available via `--json-full`.
+6. **PDF detection:** To find linked PDFs, re-fetch the tweet with `--json-full` and parse `_raw.legacy.entities.urls[].expanded_url`. There is no `links` field on bird responses -- expanded URLs are only available via `--json-full`. Insert `api_delay_ms` before this call (it counts toward rate limiting).
 7. **Inject embeds** within fenced markers:
    ```
    <!-- enrich:media -->
