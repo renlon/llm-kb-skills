@@ -1,7 +1,7 @@
 # KB-NotebookLM Bridge Skill Design
 
 **Date:** 2026-04-12
-**Revision:** 2 (post peer-debate review)
+**Revision:** 5 (post peer-consensus round 3)
 **Scope:** New skill `kb-notebooklm` for the `llm-kb-skills` plugin
 
 ## Problem
@@ -31,7 +31,11 @@ Single skill `kb-notebooklm` with a SKILL.md that:
 1. Reads `kb.yaml` for config and `.notebooklm-state.yaml` for mutable state
 2. Accepts both subcommands and natural language
 3. Routes to the appropriate workflow
-4. Each workflow follows: **select files -> dedup check -> create notebook -> add sources -> wait for processing -> generate artifact -> wait for completion -> download -> update state -> cleanup**
+4. Each workflow follows: **select files -> dedup check -> create notebook (persist immediately) -> add sources -> wait for processing -> generate artifact -> wait for completion -> download -> finalize state -> cleanup**
+
+### Concurrency Model
+
+**Single-writer only.** The skill assumes one Claude session operates on the state file at a time. Concurrent invocations (e.g., two terminal sessions) are not supported and may corrupt state. The state file uses atomic writes (write-to-tmp + mv) to protect against partial writes from crashes, but not against concurrent readers/writers.
 
 ### Subcommands
 
@@ -41,7 +45,7 @@ Single skill `kb-notebooklm` with a SKILL.md that:
 | `quiz [--topic X] [--difficulty D]` | Quiz/flashcards from lessons | Lessons newer than `last_quiz` timestamp, optionally filtered by topic |
 | `digest` | Wiki changes summary as podcast | Wiki articles changed since `last_digest` timestamp |
 | `report [--topic X] [--format F]` | Topic-focused report | Lessons + wiki articles matching topic |
-| `research-audio` | Research results to podcast | Latest `output_path/*.md` research reports |
+| `research-audio` | Research results to podcast | Latest `output_path/**/*.md` research reports |
 | `cleanup [--days N]` | Delete old MLL notebooks | Notebooks older than N days (default from config) |
 | `status` | Show last runs, active notebooks | Reads state file |
 
@@ -89,15 +93,15 @@ integrations:
       quantity: standard            # fewer|standard|more
 ```
 
-**Key changes from v1:**
-- `language` is a top-level setting under `notebooklm:`, not nested under `podcast`. All artifact types (podcast, quiz, digest, report) use it.
+**Key design choices:**
+- `language` is a top-level setting under `notebooklm:`. All artifact types (podcast, quiz, digest, report) use it.
 - `wiki_path` is explicitly configured (not assumed as a relative path).
 - `max_sources_per_notebook` caps sources to stay under NotebookLM's platform limit.
 - No `state` section — mutable state is stored separately.
 
 ### State File: `.notebooklm-state.yaml`
 
-Mutable state lives in a separate file at the KB project root (alongside `kb.yaml`), not inside `kb.yaml`. This prevents config corruption from frequent writes and avoids concurrency issues.
+Mutable state lives in a separate file at the KB project root (alongside `kb.yaml`), not inside `kb.yaml`. This prevents config corruption from frequent writes.
 
 **Path:** `<project_root>/.notebooklm-state.yaml`
 
@@ -111,19 +115,25 @@ notebooks:
     title: "MLL Podcast 2026-04-12"
     created: "2026-04-12T14:30:00Z"
     workflow: podcast
+    status: completed                    # pending | completed | failed
 
 runs:
   - workflow: podcast
     timestamp: "2026-04-12T14:30:00Z"
     sources_hash: "a1b2c3..."
-    artifact_type: audio
-    output_file: /Users/dragon/Documents/MLL/output/podcast-2026-04-12.mp3
+    params_hash: "d4e5f6..."
+    artifacts:
+      - type: audio
+        output_file: /Users/dragon/Documents/MLL/output/podcast-2026-04-12.mp3
+        status: completed
     notebook_id: "abc123..."
 ```
 
 **Timestamps:** All time values use ISO 8601 with timezone (`YYYY-MM-DDTHH:MM:SSZ`). Compared against filesystem mtime for incremental detection.
 
-**State file writes:** The LLM agent reads the full file, modifies in memory, and writes the entire file back. Since this skill runs single-threaded within one Claude session, there is no concurrency risk. If the file does not exist, the skill creates it with empty defaults.
+**State file writes:** The LLM agent reads the full file, modifies in memory, and writes the entire file back atomically (write to `.notebooklm-state.yaml.tmp`, then `mv` to `.notebooklm-state.yaml`). Background subagents do NOT write state — they report results back to the main conversation, which then writes state.
+
+**Corrupt state recovery:** If the state file fails to parse as YAML, back it up to `.notebooklm-state.yaml.bak.<timestamp>`, log a warning with the backup path, and initialize fresh. This preserves evidence for debugging while allowing the skill to continue. The user is warned that dedup history was lost and duplicate artifacts may be generated.
 
 **Pruning:** The `runs` array is pruned on every write. Entries older than `cleanup_days * 2` (default: 14 days) are removed. This bounds growth to roughly 2-4 entries per day.
 
@@ -131,7 +141,16 @@ runs:
 
 **No duplicate artifacts.** Before generating any content, check whether an equivalent artifact already exists.
 
-The dedup key is: `workflow type + sources_hash`. The `sources_hash` is a SHA-256 of the sorted list of `filepath:mtime` pairs (one per line), so it changes when files are added, removed, or edited.
+The dedup key is: `workflow type + sources_hash + params_hash`. This ensures that the same sources with different generation parameters (e.g., different podcast format, quiz difficulty, or language) are treated as distinct requests.
+
+**`sources_hash`:** SHA-256 of the sorted list of `filepath:mtime` pairs (one per line). Changes when files are added, removed, or edited. Since source uploads use an all-or-nothing model (any failure aborts the run), the `sources_hash` computed at selection time is always identical to the final processed set.
+
+**`params_hash`:** SHA-256 of the generation parameters that materially affect output. Per workflow:
+- `podcast`: `format + length + language + instruction_template`
+- `quiz`: `difficulty + quantity + language`
+- `digest`: `language + instruction_template`
+- `report`: `topic + format + language`
+- `research-audio`: `language + instruction_template`
 
 **Dedup check (runs after file selection, before notebook creation):**
 
@@ -139,32 +158,41 @@ The dedup key is: `workflow type + sources_hash`. The `sources_hash` is a SHA-25
    - For each selected file, get its path and filesystem mtime (as ISO 8601)
    - Sort by path
    - Join as `path:mtime\n` and compute SHA-256
-2. Search `runs` in state file for an entry matching `workflow + sources_hash`
-3. If match found:
-   - Report: "Already generated a <workflow> from the same sources on <timestamp>. Output: <output_file>"
-   - Verify the output file still exists on disk
-   - If output file exists -> skip, stop
-   - If output file missing -> proceed (re-generate)
-4. If no match -> proceed with generation
+2. Compute `params_hash` from the workflow's generation parameters
+3. Search `runs` in state file for an entry matching `workflow + sources_hash + params_hash`
+4. If match found:
+   - Check per-artifact status in the matched run record
+   - If all artifacts are `completed` and output files exist on disk -> skip, stop
+   - If any artifact is `failed` or output file missing -> proceed with **partial retry** (re-generate only failed/missing artifacts, reuse the existing notebook if still in state)
+   - Report what is being skipped vs re-generated
+5. If no match -> proceed with full generation
 
-**Same-day, different content:** If a lesson file is edited after a podcast was generated, its mtime changes, producing a different `sources_hash`. A new podcast is generated. This is correct — the content changed.
+**Same-day, different content:** If a lesson file is edited after a podcast was generated, its mtime changes, producing a different `sources_hash`. A new podcast is generated.
 
-**Same-day, same content:** Running `podcast` twice without any file changes produces the same `sources_hash`. The second run is skipped. This prevents duplicate NotebookLM artifacts.
+**Same sources, different params:** Running `podcast --format deep-dive` and then `podcast --format critique` with the same sources produces different `params_hash` values. Both generate.
 
-**Topic-filtered runs:** Different topic filters select different files, producing different `sources_hash` values. `podcast --topic attention` and `podcast --topic quantization` are naturally deduplicated.
+**Topic-filtered runs:** Different topic filters select different files, producing different `sources_hash` values. Naturally deduplicated.
 
-## Source Count Limits
+## Source Count Limits and Incremental Selection
 
 NotebookLM imposes per-notebook source limits (Standard: 50, Plus: 100). The `max_sources_per_notebook` config (default: 45) prevents hitting this limit.
 
+**Selection order: oldest-first.** Incremental workflows (`podcast`, `quiz`, `digest`) sort candidate files by mtime ascending (oldest first) and take the first `max_sources_per_notebook`. This ensures that the backlog drains in order — older files are processed before newer ones, and no file is permanently skipped.
+
 **When selected files exceed `max_sources_per_notebook`:**
 
-1. Sort selected files by modification date (newest first)
+1. Sort selected files by modification date (oldest first)
 2. Take the first `max_sources_per_notebook` files
-3. Log warning: "Selected N files but limited to <max> newest. Older files excluded: [list]"
+3. Log warning: "Selected N files but limited to <max> oldest-first. Remaining files will be included in the next run: [list]"
 4. Proceed with the truncated set
 
-This prioritizes recent content, which aligns with the "new since last run" design. For first-run scenarios (all files selected), only the most recent 45 are included. The user can adjust `max_sources_per_notebook` in `kb.yaml` if they have a higher-tier plan.
+**Watermark advancement:** `last_<workflow>` is set to the **newest mtime among the processed files** in the batch. This means:
+- All files in the current batch with mtime <= watermark are now "done"
+- Files that exceeded the limit (newer than the batch) remain eligible for the next run
+
+**Source failure model: all-or-nothing.** If any source fails to add or reaches `error` status during processing, the entire run aborts. The notebook is marked `failed` in state (for cleanup), the watermark is NOT advanced, and no artifacts are generated. This prevents the watermark from skipping past failed files. The user is informed which source failed and can retry the entire run after investigating.
+
+**Example:** 60 files eligible, limit 45. Oldest 45 are selected. All sources add and process successfully. Watermark advances to the mtime of the 45th file. The remaining 15 newer files are picked up on the next run. If source #12 fails, the entire run aborts — watermark stays, all 45 files are retried next run.
 
 ## Workflow Details
 
@@ -173,107 +201,153 @@ This prioritizes recent content, which aligns with the "new since last run" desi
 1. Verify `notebooklm` CLI is on PATH (check with `which notebooklm`)
 2. Run `notebooklm auth check --json` — if auth fails, tell user to run `notebooklm login` and stop
 3. Read `kb.yaml` — if `integrations.notebooklm` is missing or `enabled: false`, report and stop
-4. Read `.notebooklm-state.yaml` — if missing, initialize with empty defaults
-5. **(After file selection in each workflow)** Enforce source count limit, then run dedup check
+4. Read `.notebooklm-state.yaml` — if missing, initialize with empty defaults; if corrupt, back up and re-initialize (see State File section)
+5. **(After file selection in each workflow)** Enforce source count limit (oldest-first), then run dedup check
+
+### CLI Command Convention
+
+All `notebooklm` commands that target a specific notebook use the explicit `-n <notebook_id>` or `--notebook <notebook_id>` flag. The skill does **NOT** use `notebooklm use <id>` (which writes to shared global context). This prevents interference with other NotebookLM sessions or background agents.
+
+### Immediate Notebook Persistence
+
+Notebooks are persisted to state **immediately after creation** with `status: pending`. This ensures that if the workflow fails or the session terminates, the notebook is still tracked for cleanup. The status transitions are:
+
+- `pending` — notebook created, sources being added or generation in progress
+- `completed` — all artifacts generated and downloaded successfully
+- `failed` — generation or download failed; notebook kept for cleanup
+
+### Watermark Rules
+
+**Unfiltered runs** (`podcast`, `quiz`, `digest` without `--topic`): advance the global `last_<workflow>` watermark to the newest mtime of successfully processed files.
+
+**Topic-filtered runs** (`podcast --topic X`, `quiz --topic X`): do **NOT** advance the global watermark. A topic-filtered run only processes a subset of eligible files. Advancing the global watermark would permanently skip unrelated files that were newer than the old watermark but not matched by the topic filter. Topic-filtered runs rely solely on dedup to prevent re-generation.
+
+**`report` and `research-audio`**: do not advance any watermark (they are not incremental).
 
 ### `podcast [--topic X]`
 
-1. Glob `lessons_path/*.md`, exclude `README.md`
+1. Glob `lessons_path/**/*.md` (recursive), exclude `README.md`
 2. Filter to files with filesystem mtime > `state.last_podcast` (if `last_podcast` is null, include all files)
 3. If `--topic` provided, further filter by grepping file content and filenames for the topic string (case-insensitive)
-4. Enforce source count limit (truncate to `max_sources_per_notebook` newest)
+4. Sort by mtime ascending (oldest first), enforce source count limit
 5. Run dedup check — if duplicate, stop
 6. If no files match -> report "No new lessons since last podcast" and stop
 7. **Confirm with user:** "Will create a podcast from N lessons: [list]. Proceed?"
 8. `notebooklm create "MLL Podcast YYYY-MM-DD" --json` -> capture notebook ID
-9. `notebooklm use <id>`
-10. For each selected lesson file: `notebooklm source add <filepath> --json`
-    - If a source add fails, log warning and continue with remaining files
-    - If all source adds fail, delete the notebook and report error, stop
-11. Wait for all sources to be ready: poll `notebooklm source list --json` every 15s until all status=ready (timeout: 600s)
-12. `notebooklm generate audio "<instructions>" --format <config.podcast.format> --length <config.podcast.length> --language <config.language> --json` -> capture artifact ID
-13. **Long wait — use Agent tool** to spawn a subagent (see Async Completion Model below):
-    - Subagent runs: `notebooklm artifact wait <artifact_id> -n <notebook_id> --timeout 1200`
-    - Then: `notebooklm download audio <output_path>/podcast-YYYY-MM-DD.mp3 -n <notebook_id>`
-    - If `--topic` was provided, filename becomes: `podcast-<topic>-YYYY-MM-DD.mp3`
-14. Update state file: set `last_podcast` to now, append notebook to `notebooks`, append to `runs`
-15. Run auto-cleanup: delete notebooks from `notebooks` where `created` is older than `cleanup_days`
+9. **Immediately persist** notebook to state file with `status: pending`
+10. For each selected lesson file: `notebooklm source add <filepath> --notebook <notebook_id> --json`
+    - If any source add fails: mark notebook as `failed` in state, report which source failed, stop. (All-or-nothing — see Source Failure Model)
+11. Wait for all sources to be ready: poll `notebooklm source list --notebook <notebook_id> --json` every 15s until all status=ready (timeout: 600s). If any source reaches `error` status: mark notebook `failed`, report error, stop.
+12. `sources_hash` is the hash of the full selected set (no recomputation needed since all sources must succeed)
+13. `notebooklm generate audio "<instructions>" --format <config.podcast.format> --length <config.podcast.length> --language <config.language> --notebook <notebook_id> --json` -> parse response
+14. **Long wait — use Agent tool** (see Async Completion Model below)
+    - Output filename: `podcast-YYYY-MM-DD.mp3` or `podcast-<topic>-YYYY-MM-DD.mp3` if topic-filtered
+15. On success, finalize state:
+    - If unfiltered: set `last_podcast` to newest mtime among successfully added sources
+    - If topic-filtered: do NOT advance `last_podcast`
+    - Update notebook status to `completed`, append to `runs` with final `sources_hash` and `params_hash`
+16. Run auto-cleanup: delete notebooks where `created` is older than `cleanup_days`
 
-**Audio instructions:** The skill composes instructions from the selected lessons. Template: "Cover the key concepts from these lessons: [comma-separated lesson titles]. Make it engaging and educational. Highlight connections between topics where they exist. Target audience: someone learning ML/AI concepts."
+**Audio instructions template:** "Cover the key concepts from these lessons: [comma-separated lesson titles]. Make it engaging and educational. Highlight connections between topics where they exist. Target audience: someone learning ML/AI concepts."
 
 ### `quiz [--topic X] [--difficulty D]`
 
-1. Glob `lessons_path/*.md`, exclude `README.md`
-2. Filter to files with filesystem mtime > `state.last_quiz` (NOT `last_podcast` — each workflow tracks its own timestamp)
+1. Glob `lessons_path/**/*.md` (recursive), exclude `README.md`
+2. Filter to files with filesystem mtime > `state.last_quiz` (each workflow tracks its own timestamp)
 3. If `--topic` provided, further filter by grepping file content and filenames
-4. Enforce source count limit
+4. Sort by mtime ascending (oldest first), enforce source count limit
 5. Run dedup check
 6. If no files match -> report "No new lessons since last quiz" and stop
 7. **Confirm with user:** "Will generate quiz + flashcards from N lessons: [list]. Proceed?"
 8. Create notebook: `notebooklm create "MLL Quiz YYYY-MM-DD" --json`
-9. `notebooklm use <id>`
-10. Add sources (same error handling as podcast)
-11. Wait for sources to be ready
-12. `notebooklm generate quiz --difficulty <D or config.quiz.difficulty> --quantity <config.quiz.quantity> --language <config.language> --json`
-13. Wait for completion, then download:
+9. **Immediately persist** notebook to state file with `status: pending`
+10. Add sources with `--notebook <notebook_id>` (same all-or-nothing error handling as podcast)
+11. Wait for sources to be ready (same as podcast — any source error aborts the run)
+12. **Check for partial-retry:** If dedup found a matching run with per-artifact status, check which artifacts are `completed` vs `failed`. Skip generation/download for completed artifacts and only process failed ones. If no prior run, generate both.
+13. **Generate quiz** (skip if already `completed` in a prior partial run):
+    - `notebooklm generate quiz --difficulty <D or config.quiz.difficulty> --quantity <config.quiz.quantity> --language <config.language> --notebook <notebook_id> --json`
+    - Wait for completion, then download:
     - `notebooklm download quiz --format markdown <output_path>/quiz-YYYY-MM-DD.md -n <notebook_id>`
     - `notebooklm download quiz --format json <output_path>/quiz-YYYY-MM-DD.json -n <notebook_id>`
     - If `--topic`, filenames become: `quiz-<topic>-YYYY-MM-DD.md` / `.json`
-14. Generate flashcards:
-    - `notebooklm generate flashcards --difficulty <D> --quantity <Q> --language <config.language> --json`
-    - Wait, then download:
+14. **Generate flashcards** (skip if already `completed` in a prior partial run):
+    - `notebooklm generate flashcards --difficulty <D or config.quiz.difficulty> --quantity <config.quiz.quantity> --language <config.language> --notebook <notebook_id> --json`
+    - Wait for completion, then download:
     - `notebooklm download flashcards --format markdown <output_path>/flashcards-YYYY-MM-DD.md -n <notebook_id>`
     - If `--topic`, filename becomes: `flashcards-<topic>-YYYY-MM-DD.md`
-15. Update state file: set `last_quiz` to now, append notebook, append runs
+15. Finalize state:
+    - Run record stores `artifacts` array with per-artifact status:
+      ```yaml
+      artifacts:
+        - type: quiz
+          output_file: .../quiz-YYYY-MM-DD.json
+          status: completed
+        - type: flashcards
+          output_file: .../flashcards-YYYY-MM-DD.md
+          status: completed   # or "failed" if flashcard generation failed
+      ```
+    - If unfiltered: set `last_quiz` to newest mtime of successfully added sources
+    - If topic-filtered: do NOT advance `last_quiz`
+    - Update notebook status to `completed` if all artifacts succeeded, or `failed` if any artifact failed
+    - Partial success is tracked only at the artifact level within the run record, not at the notebook level
 16. Run auto-cleanup
+
+**Partial success:** If quiz succeeds but flashcards fail (or vice versa), the run record reflects per-artifact status. The watermark still advances (the sources were processed). On the next invocation, dedup checks against the `sources_hash + params_hash`; since the params haven't changed and sources are the same, the run matches — but the skill checks per-artifact status and only re-generates the failed artifact.
 
 ### `digest`
 
-1. Glob `wiki_path/*.md` (using configured `wiki_path`, not relative `wiki/`)
+1. Glob `wiki_path/**/*.md` (recursive, using configured `wiki_path`)
 2. Filter to files with filesystem mtime > `state.last_digest`
 3. Exclude index files: `_index.md`, `_sources.md`, `_categories.md`, `_evolution.md`
-4. Enforce source count limit
+4. Sort by mtime ascending (oldest first), enforce source count limit
 5. Run dedup check
 6. If no changed files -> report "No wiki changes since last digest" and stop
 7. **Confirm with user:** "Will create a wiki digest podcast from N changed articles: [list]. Proceed?"
 8. Create notebook: `notebooklm create "MLL Wiki Digest YYYY-MM-DD" --json`
-9. Add changed wiki articles as sources
-10. Wait for sources to be ready
-11. `notebooklm generate audio "Summarize the key changes and new knowledge in these wiki articles. Focus on what's new, why it matters, and how topics connect." --language <config.language> --json`
-12. Wait and download to `<output_path>/digest-YYYY-MM-DD.mp3` (via subagent)
-13. Update state file: set `last_digest` to now, append notebook, append run
-14. Run auto-cleanup
+9. **Immediately persist** notebook with `status: pending`
+10. Add changed wiki articles as sources with `--notebook <notebook_id>` (all-or-nothing — any failure aborts)
+11. Wait for sources to be ready (any source error aborts the run)
+13. `notebooklm generate audio "Summarize the key changes and new knowledge in these wiki articles. Focus on what's new, why it matters, and how topics connect." --language <config.language> --notebook <notebook_id> --json`
+14. Wait and download to `<output_path>/digest-YYYY-MM-DD.mp3` (via subagent)
+15. Finalize state: set `last_digest` to newest mtime of successfully added sources, update notebook to `completed`, append run
+16. Run auto-cleanup
 
 ### `report [--topic X] [--format F]`
 
 1. `--topic` is required. If not provided, ask the user.
-2. Search both `lessons_path/*.md` and `wiki_path/*.md` for files matching the topic:
+2. Search both `lessons_path/**/*.md` and `wiki_path/**/*.md` (recursive) for files matching the topic:
    - Grep file content for the topic string (case-insensitive)
    - Also match filenames containing the topic
    - Exclude `README.md` and wiki index files
-3. Enforce source count limit
+3. Enforce source count limit (oldest-first)
 4. Run dedup check
 5. If no files match -> report "No content found for topic '<X>'" and stop
 6. **Confirm with user:** "Will generate a <format> report on '<topic>' from N files: [list]. Proceed?"
 7. Create notebook: `notebooklm create "MLL Report: <topic> YYYY-MM-DD" --json`
-8. Add matching files as sources, wait for ready
-9. `notebooklm generate report --format <F or briefing-doc> --language <config.language> --json`
-   - Default format: `briefing-doc`. Other options: `study-guide`, `blog-post`, `custom`
-10. Wait, download to `<output_path>/report-<topic>-YYYY-MM-DD.md`
-11. Update state, append notebook, append run, run cleanup
+8. **Immediately persist** notebook with `status: pending`
+9. Add matching files as sources with `--notebook <notebook_id>`, wait for ready
+10. `notebooklm generate report --format <F or briefing-doc> --language <config.language> --notebook <notebook_id> --append "Focus on the topic: <topic>" --json`
+    - Default format: `briefing-doc`. Other options: `study-guide`, `blog-post`, `custom`
+    - The `--append` flag passes topic-specific instructions to the generation template
+12. Wait, download to `<output_path>/report-<topic>-YYYY-MM-DD.md`
+13. Finalize state: update notebook to `completed`, append run, run cleanup
+    - `report` does not advance any watermark (it is topic-filtered, not incremental)
 
 ### `research-audio`
 
-1. Glob `output_path/*report*.md` and `output_path/*research*.md` (using configured `output_path`)
+1. Glob `output_path/**/*report*.md` and `output_path/**/*research*.md` (recursive, using configured `output_path`)
 2. Sort by modification date, take the most recent (or let user choose if multiple)
 3. If no research files -> report "No research output found in <output_path>" and stop
 4. Run dedup check
 5. **Confirm with user:** "Will create an audio summary of: <filename>. Proceed?"
 6. Create notebook: `notebooklm create "MLL Research Audio YYYY-MM-DD" --json`
-7. Add research file(s) as sources, wait for ready
-8. `notebooklm generate audio "Summarize these research findings. Cover key discoveries, methodology, and implications. Make it accessible." --language <config.language> --json`
-9. Wait and download to `<output_path>/research-audio-YYYY-MM-DD.mp3` (via subagent)
-10. Update state, append notebook, append run, run cleanup
+7. **Immediately persist** notebook with `status: pending`
+8. Add research file(s) as sources with `--notebook <notebook_id>`, wait for ready
+9. Recompute `sources_hash` from successfully added sources
+10. `notebooklm generate audio "Summarize these research findings. Cover key discoveries, methodology, and implications. Make it accessible." --language <config.language> --notebook <notebook_id> --json`
+11. Wait and download to `<output_path>/research-audio-YYYY-MM-DD.mp3` (via subagent)
+12. Finalize state: update notebook to `completed`, append run, run cleanup
+    - `research-audio` does not advance any watermark
 
 ### `cleanup [--days N]`
 
@@ -281,8 +355,9 @@ This prioritizes recent content, which aligns with the "new since last run" desi
 2. For each notebook where `created` timestamp is older than N days (default: `cleanup_days` from config):
    - `notebooklm delete <notebook_id>` — confirm with user before first deletion, then batch the rest
    - Remove from `notebooks` in state
-3. Prune `runs` older than `cleanup_days * 2`
-4. Write updated state file
+3. Also clean up `pending` or `failed` notebooks older than 1 day (likely orphaned)
+4. Prune `runs` older than `cleanup_days * 2`
+5. Write updated state file (atomic write)
 
 ### `status`
 
@@ -291,26 +366,40 @@ This prioritizes recent content, which aligns with the "new since last run" desi
    - Last podcast: timestamp and output file
    - Last digest: timestamp and output file
    - Last quiz: timestamp and output file
-   - Active notebooks count and list (from `notebooks`)
+   - Active notebooks: count and list with status (pending/completed/failed)
    - Notebooks pending cleanup (older than `cleanup_days`)
+   - In-flight jobs (notebooks with `status: pending`)
    - Total runs recorded
 
 ## Async Completion Model
 
-NotebookLM artifact generation is long-running (10-45 minutes). The skill uses the **Claude Code Agent tool** to handle this:
+NotebookLM artifact generation is long-running (10-45 minutes). The skill uses the **Claude Code Agent tool** to handle this.
 
-1. After `notebooklm generate ... --json` returns a `task_id`, the main workflow spawns a subagent using the Agent tool with `run_in_background: true`
-2. The subagent prompt includes the exact commands to run:
-   ```
-   Wait for artifact <artifact_id> in notebook <notebook_id> to complete, then download.
-   Run: notebooklm artifact wait <artifact_id> -n <notebook_id> --timeout <T>
-   Then: notebooklm download <type> <output_path> -n <notebook_id>
-   Report success or failure.
-   ```
-3. The main conversation continues. The user is notified when the background agent completes.
-4. State update happens after the background agent reports success. If the agent reports failure (timeout or error), state is not updated and the user is informed.
+### CLI Contract
 
-**Fallback (if background agent is not suitable):** The skill can instead report the artifact ID and instruct the user to check status later with `notebooklm artifact list` and download manually. This is the safe default if the session is about to end.
+`notebooklm generate <type> ... --json` returns a JSON object. The key fields vary by artifact type but always include a status indicator. For async artifacts (audio, video), the response contains a `task_id`. The skill then uses `notebooklm artifact list --notebook <notebook_id> --json` to find the corresponding artifact ID and status.
+
+### Async Flow
+
+1. After `notebooklm generate ... --notebook <notebook_id> --json` returns, parse the response.
+2. Run `notebooklm artifact list --notebook <notebook_id> --json` to get the artifact ID and current status.
+3. Spawn a background subagent using the Agent tool with `run_in_background: true`. The subagent prompt:
+   ```
+   Wait for the latest <type> artifact in notebook <notebook_id> to complete, then download.
+   1. Run: notebooklm artifact wait <artifact_id> -n <notebook_id> --timeout <T>
+   2. If exit code 0: Run: notebooklm download <type> <output_path> -n <notebook_id>
+   3. If exit code 2 (timeout): Report timeout.
+   4. If exit code 1 (error): Report error details.
+   Report the outcome (success with file path, or failure with reason).
+   ```
+4. The main conversation continues. The user is notified when the background agent completes.
+5. State finalization happens in the main conversation after the background agent reports success. The subagent does NOT write state.
+
+### Sync Artifacts
+
+Some artifact types (mind-map, data-table, report, quiz, flashcards) complete relatively quickly. For these, the skill waits inline (no background agent) and downloads immediately.
+
+**Fallback:** If the session is about to end, skip the background agent. Instead report the artifact ID and notebook ID so the user can download manually: `notebooklm download <type> <path> -n <notebook_id>`.
 
 ## Error Handling
 
@@ -320,15 +409,16 @@ NotebookLM artifact generation is long-running (10-45 minutes). The skill uses t
 | Auth check fails | Report: "NotebookLM auth expired. Run `notebooklm login`." Stop. |
 | `kb.yaml` missing notebooklm config | Report: "Add `integrations.notebooklm` to kb.yaml." Stop. |
 | State file missing | Create with empty defaults. Continue. |
-| State file corrupt | Log warning, re-initialize with empty defaults. Continue. |
-| Source add fails for one file | Log warning, continue with remaining sources. |
-| All source adds fail | Delete the created notebook, report error, stop. |
-| Source count exceeds limit | Truncate to newest `max_sources_per_notebook`, log warning. Continue. |
-| Generation fails (rate limit) | Report to user, suggest retry in 5-10 minutes. Do not auto-retry. |
-| Artifact wait timeout | Report timeout, suggest `notebooklm artifact list`. Do not update state. |
-| Download fails | Check artifact status, report clearly. Do not update state. |
+| State file corrupt | Back up to `.bak.<timestamp>`, warn user, re-initialize. Continue. |
+| Any source add fails | Mark notebook as `failed` in state, report which source failed, stop. Do not advance watermark. (All-or-nothing) |
+| Any source enters `error` status | Mark notebook as `failed`, report error, stop. Do not advance watermark. (All-or-nothing) |
+| Source count exceeds limit | Truncate oldest-first to `max_sources_per_notebook`, log warning. Remaining files eligible next run. |
+| Generation fails (rate limit) | Report to user, suggest retry in 5-10 minutes. Mark notebook `failed`. Do not advance watermark. |
+| Artifact wait timeout | Report timeout, suggest `notebooklm artifact list`. Do not finalize state. |
+| Download fails | Check artifact status, report clearly. Do not finalize state. |
 | No files match selection | Report clearly, do not create empty notebook. |
-| Partial failure (notebook created, generation failed) | Leave notebook in state for cleanup. Report error to user. |
+| Partial failure (quiz ok, flashcards failed) | Record per-artifact status in run record. Watermark advances (sources were ok). Next run: dedup detects matching run, inspects per-artifact status, re-generates only failed artifact. |
+| Session terminates mid-workflow | Notebook persisted as `pending` in state. Cleanup will handle it after 1 day. |
 
 ## Autonomy Rules
 
@@ -339,15 +429,14 @@ NotebookLM artifact generation is long-running (10-45 minutes). The skill uses t
 - Reading `kb.yaml` and state file
 - Natural language routing and intent parsing
 - State file updates (after user-approved operations complete)
-- Age-based notebook cleanup during auto-cleanup step
 - Downloading artifacts (after user approved generation)
+- Auto-cleanup of notebooks older than `cleanup_days` at the end of a workflow
 
 **Ask before running (single confirmation per workflow):**
-- The workflow confirmation prompt (step 7 in podcast, etc.) covers: notebook creation, source adding, and artifact generation as a single approval
+- The workflow confirmation prompt (step 7 in podcast, etc.) covers: notebook creation, source adding, artifact generation, waiting, downloading, and state update as a single approval
 - Explicit `cleanup` subcommand (confirm before first deletion)
-- `notebooklm delete` when called directly
 
-**Rationale:** The user approves the workflow once at the confirmation prompt. Everything after that (source upload, generation, wait, download, state update, auto-cleanup) is autonomous. This avoids 5+ confirmation prompts per run.
+**Rationale:** The user approves the workflow once at the confirmation prompt. Everything after that (source upload, generation, wait, download, state update, auto-cleanup) is autonomous. This avoids repeated confirmation prompts per run.
 
 ## File Structure
 
@@ -361,7 +450,17 @@ Single SKILL.md file. State management (YAML read/write, SHA-256 hashing, mtime 
 
 **Required system tools:**
 - `notebooklm` CLI (from `notebooklm-py` package)
-- `python3` (for YAML parsing, SHA-256, mtime reads — already available in the environment)
+- `python3` (for YAML parsing via `import yaml`, SHA-256 via `hashlib`, mtime reads via `os.path.getmtime`)
+
+**Atomic state writes:** State file updates use `python3 -c` to write to a temp file and `mv` atomically:
+```python
+import yaml, tempfile, os, shutil
+# ... modify state dict ...
+with tempfile.NamedTemporaryFile(mode='w', dir=state_dir, suffix='.tmp', delete=False) as f:
+    yaml.dump(state, f)
+    tmp = f.name
+shutil.move(tmp, state_path)
+```
 
 ## Prerequisites
 
@@ -369,7 +468,7 @@ Single SKILL.md file. State management (YAML read/write, SHA-256 hashing, mtime 
 - Playwright Chromium installed (`playwright install chromium`)
 - Authenticated session (`notebooklm login` completed)
 - `integrations.notebooklm` section present in `kb.yaml`
-- `python3` available on PATH (for inline state management)
+- `python3` with `pyyaml` available on PATH (for inline state management)
 
 ## Out of Scope
 
