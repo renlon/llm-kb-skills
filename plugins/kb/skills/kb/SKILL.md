@@ -212,7 +212,14 @@ For each new or changed source, dispatch a sonnet subagent to:
 2. Determine type (article, paper, transcript, dataset, etc.)
 3. Extract concepts, claims, entities, and relationships
 4. **Choose article format** for each concept -- `default` or `tutorial` (see format selection criteria below)
-5. Return a structured extraction object including the chosen format per concept
+5. **Evaluate diagrammability** -- Set `diagram: true` in the extraction output when the concept meets ANY of:
+   - Multi-step processes, pipelines, or workflows
+   - Architectures with multiple interacting components
+   - Data flows with transformations
+   - Hierarchies or taxonomies with 4+ nodes
+
+   Do NOT flag: single-definition concepts, people, organizations, events, datasets, benchmarks, or concepts where the source material is too thin for a meaningful diagram.
+6. Return a structured extraction object including the chosen format per concept and the `diagram` flag
 
 ### Opus Orchestration
 
@@ -222,6 +229,32 @@ After extractions complete, opus:
 6. Existing concepts -> update and enrich the article with new information
 7. Add source backlinks to every article touched
 8. Auto-categorize articles into folders based on topic
+
+### Auto-Diagram Generation (Phase 3.5)
+
+**Gate:** Only runs if `compile.diagrams.enabled: true` in `kb.yaml`. If missing or `false`, skip this phase entirely.
+
+1. Collect all new/updated articles from Phase 3 that have `diagram: true` in frontmatter
+2. For each article, check if `wiki/diagrams/<concept-slug>.excalidraw` already exists:
+   - If exists: read the article's `diagram_hash` frontmatter field. If `diagram_hash` matches the article's current hash in `wiki/_index.md`, skip (diagram is up to date). If different or missing, regenerate.
+   - If does not exist: generate.
+3. For each article that needs a diagram, invoke the `kb-excalidraw` skill (via Skill tool) with:
+   - `concept_name`: article title
+   - `relationships`: list of `[[wikilink]]` targets from the Relationships section
+   - `diagram_type`: inferred from article content (workflow/architecture/hierarchy/data_flow/comparison)
+   - `context`: the article body text
+   - `output_path`: `wiki/diagrams/<concept-slug>.excalidraw`
+4. After diagram generation, inject `![[<concept-slug>.excalidraw]]` into the article:
+   - Tutorial format: top of "Technical Deep-Dive" section
+   - Default format: top of "Details" section
+   - Skip if embed already present
+5. Set `diagram_hash` in the article's frontmatter to the article's current `_index.md` hash
+6. Print summary: "Generated N diagrams:" followed by a list with Obsidian URIs:
+   ```
+   - attention-mechanism.excalidraw → obsidian://open?vault=<vault_name>&file=wiki/diagrams/attention-mechanism.excalidraw
+   ```
+   Read `obsidian.vault_name` from `kb.yaml` for URI construction.
+7. Log each to `wiki/_evolution.md`: `YYYY-MM-DD | compile:diagram | created/updated <name>.excalidraw | <article>`
 
 ### Wiki Article Formats
 
@@ -250,6 +283,7 @@ title: "Concept Name"
 aliases: [alternate name, abbreviation]
 tags: [domain, topic]
 article_format: default
+diagram: false
 sources:
   - "[[raw/articles/source-file.md]]"
 created: 2026-04-03
@@ -285,6 +319,7 @@ title: "Concept Name"
 aliases: [alternate name, abbreviation]
 tags: [domain, topic]
 article_format: tutorial
+diagram: false
 sources:
   - "[[raw/articles/source-file.md]]"
 created: 2026-04-03
@@ -422,6 +457,63 @@ Save to `output/lint-YYYY-MM-DD.md`. Group issues by severity, include suggested
 3. Opus collates, deduplicates, and ranks suggestions by value
 4. Present as a numbered list with brief rationale for each
 5. User picks items -> Claude executes via Compile, Query, or web search as appropriate
+
+## Workflow 5: Diagram
+
+**Trigger:** User says "diagram", "draw", "visualize", or `/kb diagram <description>`.
+
+### Step 1: Parse Input
+
+Determine the input mode:
+
+- **Wiki concept:** If the description matches an existing wiki article title or alias, read that article for context, relationships, and article format.
+- **Freeform description:** Use the description directly as context. Search `wiki/_index.md` for related articles to enrich the context.
+- **Source reference:** If the description is a file path under `raw/`, read that source file for context.
+
+### Step 2: Determine Diagram Type
+
+Based on the content, classify the diagram type:
+- **workflow** — multi-step processes, pipelines
+- **architecture** — system components and their interactions
+- **hierarchy** — taxonomies, tree structures, categorizations
+- **data_flow** — input/output transformations, data pipelines
+- **comparison** — side-by-side analysis of alternatives
+
+### Step 3: Invoke kb-excalidraw
+
+Invoke the `kb-excalidraw` skill (via Skill tool) with:
+- `concept_name`: the concept or topic being diagrammed
+- `relationships`: list of `[[wikilink]]` targets from the article's Relationships section (empty list if freeform)
+- `diagram_type`: from Step 2
+- `context`: the relevant text (article body, source content, or freeform description)
+- `output_path`: `wiki/diagrams/<concept-slug>.excalidraw`
+
+**Naming convention:** `<concept-slug>.excalidraw` — lowercase, hyphenated. Examples: `attention-mechanism.excalidraw`, `kv-cache-data-flow.excalidraw`.
+
+### Step 4: Embed in Wiki Article
+
+If a corresponding wiki article exists:
+- For `article_format: tutorial` articles: insert `![[<concept-slug>.excalidraw]]` at the top of the "Technical Deep-Dive" section
+- For `article_format: default` articles: insert `![[<concept-slug>.excalidraw]]` at the top of the "Details" section
+- If the embed already exists, do not duplicate it
+
+### Step 5: Open in Obsidian
+
+Read `obsidian.vault_name` from `kb.yaml`. Run:
+```bash
+open "obsidian://open?vault=<vault_name>&file=wiki/diagrams/<concept-slug>.excalidraw"
+```
+
+### Step 6: Log
+
+Append to `wiki/_evolution.md`:
+```
+YYYY-MM-DD | diagram | created <concept-slug>.excalidraw | <article name or "freeform">
+```
+
+### Incremental Behavior
+
+Always generates — explicit user request is an override. If a diagram with the same name exists, overwrite it.
 
 ## Handling X/Twitter Links
 
