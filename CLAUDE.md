@@ -9,6 +9,9 @@
 
 - Always read `kb.yaml` at the project root before operating. It contains paths, output format preferences, Obsidian config, and external source paths.
 - `external_sources` in `kb.yaml` lists folders outside the project that are included in compile, lint, and indexing. These are read-only by default -- the skill never modifies files in external paths.
+- `compile.diagrams.enabled` in `kb.yaml` controls auto-diagram generation during compile (default: `false`).
+- `obsidian.vault_name` in `kb.yaml` is used for `obsidian://` URI construction to open diagrams in Obsidian.
+- Generated diagrams are stored in `wiki/diagrams/` and embedded via `![[name.excalidraw]]`.
 
 ## Skills
 
@@ -20,6 +23,7 @@
 - `research-add-items` -- Add items (research targets) to an existing research outline.
 - `research-report` -- Summarize deep research results into a markdown report.
 - `kb-arc` -- Archive session Q&A into MLL lessons with intelligent merge and auto git-push.
+- `kb-excalidraw` -- Diagram engine: generates Excalidraw JSON from concept descriptions. Used by `/kb diagram`, compile Phase 3.5, and `kb-arc`.
 
 ## Formatting Rules (Obsidian-Compatible)
 
