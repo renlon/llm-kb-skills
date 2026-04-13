@@ -31,29 +31,31 @@ This skill operates in two layers:
 
 **MUST BE THE FIRST ACTION ON EVERY INVOCATION:**
 
-1. **Check NotebookLM CLI installation:**
-   ```bash
-   which notebooklm
-   ```
-   If not found, report: "NotebookLM CLI not installed. Run: `pip install 'notebooklm-py[browser]'` and `playwright install chromium`" and STOP.
+1. **Read configuration:**
+   Read `kb.yaml`. Check for `integrations.notebooklm` section. If missing or `enabled: false`, report: "NotebookLM integration not enabled in kb.yaml." and STOP.
 
-2. **Check authentication:**
+2. **Resolve CLI path:**
+   Read `config.cli_path` from `integrations.notebooklm`. This is the absolute path to the `notebooklm` binary in its dedicated venv.
    ```bash
-   notebooklm auth check --json
+   # Example: /Users/dragon/notebooklm-py/.venv/bin/notebooklm
    ```
-   If fails, report: "NotebookLM not authenticated. Run: `notebooklm login` and follow the prompts." and STOP.
+   Verify the binary exists:
+   ```bash
+   test -x "<config.cli_path>" && echo "CLI found" || echo "CLI not found"
+   ```
+   If not found, report: "NotebookLM CLI not found at `<config.cli_path>`. Install with: `cd /path/to/notebooklm-py && python -m venv .venv && .venv/bin/pip install 'notebooklm-py[browser]' && .venv/bin/playwright install chromium`" and STOP.
 
-3. **Read configuration:**
+   **For all subsequent `notebooklm` commands in this skill, use `<config.cli_path>` as the command.** This ensures the skill uses its dedicated Python venv without affecting system Python or other projects.
+
+3. **Check authentication:**
    ```bash
-   # Read kb.yaml
+   <config.cli_path> auth check --json
    ```
-   Check for `integrations.notebooklm` section. If missing or `enabled: false`, report: "NotebookLM integration not enabled in kb.yaml. Add:\n```yaml\nintegrations:\n  notebooklm:\n    enabled: true\n```" and STOP.
+   If fails, report: "NotebookLM not authenticated. Run: `<config.cli_path> login` and follow the prompts." and STOP.
 
 4. **Initialize or read state file:**
-   ```bash
-   # Read .notebooklm-state.yaml
-   ```
-   - If missing: Initialize empty state file with structure
+   Read `.notebooklm-state.yaml` from the project root (alongside `kb.yaml`).
+   - If missing: Initialize empty state file with default structure
    - If corrupt YAML: Backup to `.notebooklm-state.yaml.bak.<timestamp>` and re-initialize
    - If valid: Load state
 
@@ -93,17 +95,17 @@ When invoked via natural language, route to subcommands based on keywords:
 
 ## CLI Command Convention
 
-**ALWAYS** use explicit notebook specification:
+**ALWAYS** use `<config.cli_path>` (the absolute path from `kb.yaml`) as the command, and explicit notebook specification:
 ```bash
-# CORRECT — flag comes after the command
-notebooklm source add file.md --notebook <id>
-notebooklm generate audio "instructions" -n <id>
+# CORRECT — use cli_path from config, flag comes after the command
+<config.cli_path> source add file.md --notebook <id>
+<config.cli_path> generate audio "instructions" -n <id>
 
-# NEVER use
-notebooklm use <id>  # WRONG — writes to shared global context
+# NEVER use bare "notebooklm" (may not be on PATH or may pick up wrong venv)
+# NEVER use "notebooklm use <id>" (writes to shared global context)
 ```
 
-This ensures stateless operation and prevents cross-session contamination.
+This ensures the skill uses its dedicated venv and prevents cross-session contamination.
 
 ## State Management
 
