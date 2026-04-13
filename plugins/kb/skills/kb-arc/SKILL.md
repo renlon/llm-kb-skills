@@ -1,6 +1,6 @@
 ---
 user-invocable: true
-allowed-tools: Read, Write, Edit, Glob, Grep, Bash
+allowed-tools: Read, Write, Edit, Glob, Grep, Bash, Skill
 description: "Use when archiving or saving the current session's Q&A into lesson files, or when user says 'archive', 'session wrap-up', 'save lessons', 'archive and exit', or 'archive this session'. Triggers on any request to save conversation knowledge to the MLL lessons repository."
 ---
 
@@ -107,7 +107,45 @@ clear headings. Written in the conversation's dominant language.
 (Preserve code blocks, tables, and formatting from the original exchange.)
 ```
 
-### Step 6: Update README.md
+### Step 6: Generate Diagrams (Optional)
+
+For each lesson file written or updated in Step 5, evaluate whether any technical content would benefit from an Excalidraw diagram:
+
+**Criteria — generate a diagram when:**
+- The lesson contains a workflow, pipeline, or multi-step process explanation
+- The lesson describes an architecture with multiple interacting components
+- The lesson covers a data flow or transformation chain
+- A diagram would meaningfully aid comprehension beyond what the text provides
+
+**Criteria — skip when:**
+- The lesson is purely conceptual Q&A without visual structure
+- The content is a single definition or isolated fact
+- The lesson is thin (< 200 words of technical content)
+
+**Incremental check:** Before generating, check if `wiki/diagrams/<lesson-slug>.excalidraw` already exists:
+- If exists and lesson content is unchanged (merged with no new diagrammable material) → skip
+- If exists but lesson has new diagrammable content → regenerate
+- If does not exist → generate
+
+**Generation:** Invoke the `kb-excalidraw` skill (via Skill tool) with:
+- `concept_name`: the lesson's primary topic
+- `relationships`: concepts mentioned in the lesson that have wiki articles (extract `[[wikilinks]]` from the lesson)
+- `diagram_type`: inferred from content
+- `context`: the Technical Summary section of the lesson
+- `output_path`: `wiki/diagrams/<lesson-slug>.excalidraw`
+
+**Naming:** `<lesson-slug>.excalidraw` — derived from the lesson filename, lowercase, hyphenated. Example: lesson file `KV_Cache_and_Attention_Mechanisms_2026-04-09.md` → `kv-cache-and-attention-mechanisms.excalidraw` (strip date suffix).
+
+**Embedding:** Add `![[<lesson-slug>.excalidraw]]` to the lesson file, at the end of the Technical Summary section. Skip if embed already present.
+
+**Open in Obsidian:** Read `obsidian.vault_name` from `kb.yaml` at `~/Documents/MLL/kb.yaml`. Run:
+```bash
+open "obsidian://open?vault=<vault_name>&file=wiki/diagrams/<lesson-slug>.excalidraw"
+```
+
+If no lessons qualify for diagrams, skip this step silently.
+
+### Step 7: Update README.md
 
 Read `~/Documents/MLL/lessons/README.md`. Update the topics table in the `## Topics` section:
 
@@ -115,7 +153,7 @@ Read `~/Documents/MLL/lessons/README.md`. Update the topics table in the `## Top
 - For new lessons: add a new row to the table
 - Maintain the existing table structure and sort order
 
-### Step 7: Git Sync
+### Step 8: Git Sync
 
 Run these commands in sequence:
 
@@ -130,13 +168,14 @@ cd ~/Documents/MLL && git add lessons/ && git commit -m "<descriptive message>" 
 
 No confirmation needed for any git operation. If `git pull --rebase` or `git push` fails, report the error to the user and stop. Do not retry or force-push.
 
-### Step 8: Confirmation
+### Step 9: Confirmation
 
 Report to the user:
 
 - Which topics were archived
 - For each topic: whether it was merged into an existing lesson or created as new
 - The filenames written (with full paths)
+- Which diagrams were generated (if any), with Obsidian links
 - Git push status
 
 ## Edge Cases
