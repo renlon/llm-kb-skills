@@ -90,14 +90,65 @@ external_sources:
 
 The user can add more external sources later by editing `kb.yaml` directly or re-running `kb-init`.
 
-### 5. Maintenance Cadence
+### 5. NotebookLM Integration (Optional)
+
+Ask if the user wants to generate podcasts, quizzes, and digests from their knowledge base via Google NotebookLM.
+
+If **yes**:
+
+1. **Check for existing install:** Look for the `notebooklm` binary:
+   ```bash
+   which notebooklm 2>/dev/null || find ~ -maxdepth 4 -path "*/notebooklm-py/.venv/bin/notebooklm" -type f 2>/dev/null | head -1
+   ```
+
+2. **If not found — install:**
+   ```bash
+   cd ~ && git clone https://github.com/nicholasgcoles/notebooklm-py.git
+   cd ~/notebooklm-py && python3 -m venv .venv
+   .venv/bin/pip install 'notebooklm-py[browser]'
+   .venv/bin/playwright install chromium
+   ```
+   Capture the absolute path to the binary: `~/notebooklm-py/.venv/bin/notebooklm`
+
+3. **If found** — capture the absolute path.
+
+4. **Authenticate:** Run `<cli_path> auth check --json`. If auth fails, tell the user to run `<cli_path> login` interactively (suggest `! <cli_path> login` so it runs in the current session).
+
+5. **Ask language preference:** What language should generated content use? Default: `en` (English). Common options: `zh_Hans` (Simplified Chinese), `zh_Hant` (Traditional Chinese), `ja`, `ko`, etc.
+
+6. **Ask lessons path:** Where are lesson files stored? Default: `<vault_path>/lessons`. If the user has an external lessons directory (e.g., `~/Documents/MLL/lessons`), use that.
+
+7. **Write config** to `kb.yaml` under `integrations.notebooklm`:
+   ```yaml
+   integrations:
+     notebooklm:
+       enabled: true
+       cli_path: /absolute/path/to/notebooklm
+       lessons_path: /absolute/path/to/lessons
+       wiki_path: /absolute/path/to/wiki
+       output_path: /absolute/path/to/output
+       cleanup_days: 7
+       max_sources_per_notebook: 45
+       language: zh_Hans
+       podcast:
+         format: deep-dive
+         length: long
+       quiz:
+         difficulty: medium
+         quantity: standard
+   ```
+   Use absolute paths for `lessons_path`, `wiki_path`, and `output_path` resolved from the vault path and any external sources configured in step 4.
+
+If **no**: skip. The user can set this up later by re-running `kb-init` or manually editing `kb.yaml`.
+
+### 6. Maintenance Cadence
 
 Inform about options:
 - Daily/hourly: `/loop` (e.g., `/loop 1d kb lint`)
 - Weekly/monthly: `/schedule`
 - Manual: just ask anytime
 
-### 6. Generate `kb.yaml`
+### 7. Generate `kb.yaml`
 
 Write `kb.yaml` at project root with paths, `output_formats`, obsidian config, and an `integrations` section. Example:
 
@@ -109,16 +160,16 @@ integrations:
 
 When the user sets up Smaug (during init or later), save the install path here. The kb skill reads this to find Smaug without searching every time.
 
-### 7. Scaffold Directories
+### 8. Scaffold Directories
 
 Create: `raw/articles/`, `raw/papers/`, `raw/repos/`, `raw/notes/`, `raw/images/`, `raw/transcripts/`, `raw/datasets/`, `wiki/`, `output/`. Plus `.obsidian/` if new vault.
 
-### 8. Write Project Files
+### 9. Write Project Files
 
 - `CLAUDE.md` -- project instructions for future sessions
 - `README.md` -- repo docs with prerequisites, setup, workflows, directory structure, and attribution for research skills
 
-### 9. Next Steps Guidance
+### 10. Next Steps Guidance
 
 Tell user what to do next: add sources, compile, and list available workflows (`compile`, `query`, `lint`, `evolve`).
 
