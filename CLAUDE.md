@@ -47,7 +47,7 @@ Before every `git push` to remote:
 
 1. **Always `git pull --rebase` first** to avoid rejected pushes. The remote may have been updated by other sessions.
 2. **Bump the version** in `plugins/kb/.claude-plugin/plugin.json` (patch bump unless the change warrants minor/major).
-3. **Check if the plugin is installed locally** by running `claude plugin list 2>/dev/null | grep -q 'kb@llm-kb-skills'`. If installed, run `claude plugin install kb@llm-kb-skills` to upgrade to the new version automatically.
+3. **Check if the plugin is installed locally** by running `claude plugin list 2>/dev/null | grep -q 'kb@llm-kb-skills'`. If installed, run `claude plugin marketplace update llm-kb-skills` first to refresh the cache, then `claude plugin install kb@llm-kb-skills` to upgrade. (`plugin install` alone does not pull the latest from remote.)
 
 ## Configuration
 
