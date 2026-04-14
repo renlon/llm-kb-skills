@@ -34,24 +34,29 @@ This skill operates in two layers:
 1. **Read configuration:**
    Read `kb.yaml`. Check for `integrations.notebooklm` section. If missing or `enabled: false`, report: "NotebookLM integration not enabled in kb.yaml." and STOP.
 
-2. **Resolve CLI path:**
-   Read `config.cli_path` from `integrations.notebooklm`. This is the absolute path to the `notebooklm` binary in its dedicated venv.
+2. **Resolve CLI and venv path:**
+   Read `config.venv_path` (or fall back to `config.cli_path` parent directory) from `integrations.notebooklm`. This is the absolute path to the dedicated Python venv.
    ```bash
-   # Example: /Users/dragon/notebooklm-py/.venv/bin/notebooklm
+   # Example: /Users/longren/notebooklm-py/.venv
    ```
-   Verify the binary exists:
+   Verify the venv and binary exist:
    ```bash
-   test -x "<config.cli_path>" && echo "CLI found" || echo "CLI not found"
+   test -x "<config.venv_path>/bin/notebooklm" && echo "CLI found" || echo "CLI not found"
    ```
-   If not found, report: "NotebookLM CLI not found at `<config.cli_path>`. Install with: `cd /path/to/notebooklm-py && python -m venv .venv && .venv/bin/pip install 'notebooklm-py[browser]' && .venv/bin/playwright install chromium`" and STOP.
+   If not found, report: "NotebookLM CLI not found. Run `/kb-init` to set up the integration." and STOP.
 
-   **For all subsequent `notebooklm` commands in this skill, use `<config.cli_path>` as the command.** This ensures the skill uses its dedicated Python venv without affecting system Python or other projects.
+   **IMPORTANT: All `notebooklm` commands must be prefixed with `source <config.venv_path>/bin/activate &&`** to ensure `playwright` and other dependencies are on PATH. Using the bare `cli_path` binary directly will cause Playwright errors.
+
+   For all subsequent commands in this skill, use this pattern:
+   ```bash
+   source <config.venv_path>/bin/activate && notebooklm <subcommand> [args]
+   ```
 
 3. **Check authentication:**
    ```bash
-   <config.cli_path> auth check --json
+   source <config.venv_path>/bin/activate && notebooklm auth check --json
    ```
-   If fails, report: "NotebookLM not authenticated. Run: `<config.cli_path> login` and follow the prompts." and STOP.
+   If fails, report: "NotebookLM not authenticated. Run: `source <config.venv_path>/bin/activate && notebooklm login`" and STOP.
 
 4. **Initialize or read state file:**
    Read `.notebooklm-state.yaml` from the project root (alongside `kb.yaml`).
@@ -95,17 +100,17 @@ When invoked via natural language, route to subcommands based on keywords:
 
 ## CLI Command Convention
 
-**ALWAYS** use `<config.cli_path>` (the absolute path from `kb.yaml`) as the command, and explicit notebook specification:
+**ALWAYS** activate the venv before running any `notebooklm` command, and use explicit notebook specification:
 ```bash
-# CORRECT — use cli_path from config, flag comes after the command
-<config.cli_path> source add file.md --notebook <id>
-<config.cli_path> generate audio "instructions" -n <id>
+# CORRECT — activate venv, then run notebooklm with explicit notebook flag
+source <config.venv_path>/bin/activate && notebooklm source add file.md --notebook <id>
+source <config.venv_path>/bin/activate && notebooklm generate audio "instructions" -n <id>
 
-# NEVER use bare "notebooklm" (may not be on PATH or may pick up wrong venv)
+# NEVER use bare cli_path without activation (playwright won't be on PATH)
 # NEVER use "notebooklm use <id>" (writes to shared global context)
 ```
 
-This ensures the skill uses its dedicated venv and prevents cross-session contamination.
+The venv activation is required because `notebooklm login` and browser-based operations call `playwright` by name. Without activation, `playwright` is not on PATH and commands fail with "No such file or directory".
 
 ## State Management
 

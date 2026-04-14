@@ -94,52 +94,109 @@ The user can add more external sources later by editing `kb.yaml` directly or re
 
 Ask if the user wants to generate podcasts, quizzes, and digests from their knowledge base via Google NotebookLM.
 
-If **yes**:
-
-1. **Check for existing install:** Look for the `notebooklm` binary:
-   ```bash
-   which notebooklm 2>/dev/null || find ~ -maxdepth 4 -path "*/notebooklm-py/.venv/bin/notebooklm" -type f 2>/dev/null | head -1
-   ```
-
-2. **If not found — install:**
-   ```bash
-   cd ~ && git clone https://github.com/nicholasgcoles/notebooklm-py.git
-   cd ~/notebooklm-py && python3 -m venv .venv
-   .venv/bin/pip install 'notebooklm-py[browser]'
-   .venv/bin/playwright install chromium
-   ```
-   Capture the absolute path to the binary: `~/notebooklm-py/.venv/bin/notebooklm`
-
-3. **If found** — capture the absolute path.
-
-4. **Authenticate:** Run `<cli_path> auth check --json`. If auth fails, tell the user to run `<cli_path> login` interactively (suggest `! <cli_path> login` so it runs in the current session).
-
-5. **Ask language preference:** What language should generated content use? Default: `en` (English). Common options: `zh_Hans` (Simplified Chinese), `zh_Hant` (Traditional Chinese), `ja`, `ko`, etc.
-
-6. **Ask lessons path:** Where are lesson files stored? Default: `<vault_path>/lessons`. If the user has an external lessons directory (e.g., `~/Documents/MLL/lessons`), use that.
-
-7. **Write config** to `kb.yaml` under `integrations.notebooklm`:
-   ```yaml
-   integrations:
-     notebooklm:
-       enabled: true
-       cli_path: /absolute/path/to/notebooklm
-       lessons_path: /absolute/path/to/lessons
-       wiki_path: /absolute/path/to/wiki
-       output_path: /absolute/path/to/output
-       cleanup_days: 7
-       max_sources_per_notebook: 45
-       language: zh_Hans
-       podcast:
-         format: deep-dive
-         length: long
-       quiz:
-         difficulty: medium
-         quantity: standard
-   ```
-   Use absolute paths for `lessons_path`, `wiki_path`, and `output_path` resolved from the vault path and any external sources configured in step 4.
-
 If **no**: skip. The user can set this up later by re-running `kb-init` or manually editing `kb.yaml`.
+
+If **yes**, execute all sub-steps automatically — the user should only need to interact for the browser login:
+
+#### 5a. Find or install the CLI
+
+1. **Search for existing install:**
+   ```bash
+   find ~ -maxdepth 4 -path "*/notebooklm-py/.venv/bin/notebooklm" -type f 2>/dev/null | head -1
+   ```
+
+2. **If not found — install automatically:**
+
+   **Find Python 3.10+** (required by notebooklm-py — 3.9 and below fail with `str | None` syntax errors):
+   ```bash
+   for v in python3.13 python3.12 python3.11 python3.10; do
+     p=$(which $v 2>/dev/null || find /opt/homebrew/bin /usr/local/bin -name "$v" -type f 2>/dev/null | head -1)
+     if [ -n "$p" ]; then echo "$p"; break; fi
+   done
+   ```
+   If no Python 3.10+ found, report: "NotebookLM requires Python 3.10+. Install with: `brew install python@3.12`" and skip this integration.
+
+   **Create venv and install:**
+   ```bash
+   PYTHON_BIN="<path from above>"
+   mkdir -p ~/notebooklm-py
+   $PYTHON_BIN -m venv ~/notebooklm-py/.venv
+   ~/notebooklm-py/.venv/bin/pip install 'notebooklm-py[browser]'
+   ~/notebooklm-py/.venv/bin/playwright install chromium
+   ```
+
+   **Verify the install works:**
+   ```bash
+   ~/notebooklm-py/.venv/bin/notebooklm --version
+   ```
+   If this fails, report the error and skip this integration.
+
+3. **If found** — capture the absolute path. Verify it works with `<cli_path> --version`.
+
+Set `NOTEBOOKLM_VENV` to the venv directory (e.g., `~/notebooklm-py/.venv`) for subsequent steps.
+
+#### 5b. Authenticate
+
+**IMPORTANT:** All `notebooklm` commands must run with the venv activated so that `playwright` is on PATH. Always prefix commands with `source <NOTEBOOKLM_VENV>/bin/activate &&`.
+
+1. **Check current auth:**
+   ```bash
+   source <NOTEBOOKLM_VENV>/bin/activate && notebooklm auth check --json
+   ```
+
+2. **If auth fails — guide the user through browser login:**
+
+   Tell the user:
+   > I need you to log into Google for NotebookLM. I'll open a browser — sign into your Google account, wait for the NotebookLM homepage to fully load, then **press Enter** in the terminal. Do NOT press Ctrl+C.
+
+   Then instruct the user to run:
+   ```
+   ! source <NOTEBOOKLM_VENV>/bin/activate && notebooklm login
+   ```
+   This is the **only manual step** in the entire setup. It must be run by the user because it requires interactive browser input.
+
+3. **After the user reports login is complete, verify:**
+   ```bash
+   source <NOTEBOOKLM_VENV>/bin/activate && notebooklm auth check --json
+   ```
+   Check that `status` is `"ok"` in the JSON response. If still failing (`storage_state.json` not found), the login did not save properly. Tell the user:
+   > The login didn't save. Please try again — after signing in and seeing the NotebookLM homepage, press **Enter** (Return key) in the terminal, not Ctrl+C.
+
+   Retry up to 2 times. If auth still fails after retries, write config with `enabled: false` and report that the user can authenticate later by running `source ~/notebooklm-py/.venv/bin/activate && notebooklm login`.
+
+#### 5c. Configure preferences
+
+1. **Language:** Ask what language generated content should use. Default: `en`. Common options: `zh_Hans` (Simplified Chinese), `zh_Hant` (Traditional Chinese), `ja`, `ko`.
+
+2. **Lessons path:** Auto-detect from `external_sources` configured in step 4 — look for a label containing "lesson". If not found, default to `<vault_path>/lessons`. Confirm with user.
+
+#### 5d. Write config
+
+Write to `kb.yaml` under `integrations.notebooklm`. All paths must be **absolute**:
+
+```yaml
+integrations:
+  notebooklm:
+    enabled: true
+    cli_path: /absolute/path/to/notebooklm-py/.venv/bin/notebooklm
+    venv_path: /absolute/path/to/notebooklm-py/.venv
+    lessons_path: /absolute/path/to/lessons
+    wiki_path: /absolute/path/to/wiki
+    output_path: /absolute/path/to/output
+    cleanup_days: 7
+    max_sources_per_notebook: 45
+    language: en
+    podcast:
+      format: deep-dive
+      length: long
+    quiz:
+      difficulty: medium
+      quantity: standard
+```
+
+- `cli_path`: absolute path to the `notebooklm` binary inside the venv
+- `venv_path`: absolute path to the venv directory (used for `source <venv_path>/bin/activate` in all CLI commands)
+- `lessons_path`, `wiki_path`, `output_path`: resolved from vault path and external sources
 
 ### 6. Maintenance Cadence
 
