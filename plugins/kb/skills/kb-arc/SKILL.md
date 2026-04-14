@@ -83,20 +83,21 @@ Create a new file at `~/Documents/MLL/lessons/Topic_Name_YYYY-MM-DD.md` using to
 
 **File format:** Read the template from `prompts/lesson-format.md` relative to this skill's directory. Use it as the structure for new lesson files.
 
-### Step 6: Generate Diagrams (Optional)
+### Step 6: Generate Diagrams
 
-For each lesson file written or updated in Step 5, evaluate whether any technical content would benefit from an Excalidraw diagram:
+**This step is mandatory.** Generate a diagram for every lesson file written or updated in Step 5. Do not skip this step based on subjective judgment about whether the content "needs" a diagram — every lesson gets one.
 
-**Criteria — generate a diagram when:**
-- The lesson contains a workflow, pipeline, or multi-step process explanation
-- The lesson describes an architecture with multiple interacting components
-- The lesson covers a data flow or transformation chain
-- A diagram would meaningfully aid comprehension beyond what the text provides
+**Only skip when ALL of the following are true:**
+- The lesson is under 100 words of technical content AND
+- The content is a single isolated definition with no relationships to visualize
 
-**Criteria — skip when:**
-- The lesson is purely conceptual Q&A without visual structure
-- The content is a single definition or isolated fact
-- The lesson is thin (< 200 words of technical content)
+**Diagram approach by content type:**
+- Workflow/pipeline/process → `workflow` diagram showing the steps and flow
+- Architecture/system with components → `architecture` diagram showing relationships
+- Data transformations or I/O chains → `data_flow` diagram
+- Taxonomy, hierarchy, or categorization → `hierarchy` diagram
+- Tradeoffs, alternatives, or comparisons → `comparison` diagram
+- Conceptual Q&A or definitions → `hierarchy` or `architecture` diagram showing how the concept relates to its key terms and sub-concepts
 
 **Incremental check:** Before generating, check if `wiki/diagrams/<lesson-slug>.excalidraw` already exists:
 - If exists and lesson content is unchanged (merged with no new diagrammable material) → skip
@@ -119,7 +120,7 @@ For each lesson file written or updated in Step 5, evaluate whether any technica
 open "obsidian://open?vault=<vault_name>&file=wiki/diagrams/<lesson-slug>.excalidraw"
 ```
 
-If no lessons qualify for diagrams, skip this step silently.
+If a lesson is under 100 words and contains only a single isolated definition, log "Skipped diagram for <lesson>: too thin" and move on. All other lessons must get a diagram.
 
 ### Step 7: Update README.md
 
