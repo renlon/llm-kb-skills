@@ -281,64 +281,92 @@ Each workflow follows a common pattern: select source files from the KB, filter 
 
 3. **Filter by topic (if provided):** If `--topic` specified, further filter by grepping file content and filenames for the topic string (case-insensitive).
 
-4. **Sort and limit:** Sort by mtime ascending (oldest first), truncate to `config.max_sources_per_notebook` (default 45).
+4. **Sort:** Sort by mtime ascending (oldest first).
 
-5. **Compute hashes:** Calculate `sources_hash` (from file paths and mtimes) and `params_hash` (from format, length, language, instruction template).
+5. **Topic grouping (when lesson count > 10):** If the selected lessons span multiple unrelated topic areas, group them into focused episodes rather than one long unfocused podcast. This produces better teaching flow and shorter, more digestible episodes.
 
-6. **Dedup check:** Search `state.runs` for matching `workflow + sources_hash + params_hash`. If match found, follow deduplication algorithm (session recovery, skip, re-download, or partial retry). Otherwise continue.
+   **Grouping algorithm:**
+   - Read the title and first 10 lines of each lesson to understand its topic
+   - Cluster lessons by semantic similarity (e.g., "quantization + model formats + inference frameworks" form one cluster, "attention + transformers + KV cache" form another)
+   - Each group should have 5-10 lessons and a coherent theme
+   - Exclude lessons that are clearly not ML/AI teaching content (internal tools, operational logs, non-technical topics) — report skipped lessons to the user
+   - If 10 or fewer lessons remain and they share a coherent theme, keep as a single episode
 
-7. **Handle empty selection:** If no files match after filtering, report "No new lessons since last podcast" and STOP.
+   Present the proposed grouping to the user:
+   ```
+   I'd split these N lessons into M episodes:
+   
+   Episode 1: "Theme Name" (X lessons)
+   - Lesson A
+   - Lesson B
+   ...
+   
+   Episode 2: "Theme Name" (Y lessons)
+   - Lesson C
+   ...
+   
+   Skipped (not ML/AI teaching content):
+   - Lesson Z
+   
+   Proceed with all M episodes in parallel?
+   ```
+   Wait for user confirmation. User may adjust grouping, remove episodes, or request a single episode.
 
-8. **Confirm with user:** "Will create a podcast from N lessons: [list titles or filenames]. Proceed?" Wait for user confirmation.
+   If 10 or fewer lessons, skip grouping — proceed as a single episode.
 
-9. **Create notebook:** Run `notebooklm create "MLL Podcast YYYY-MM-DD" --json`, capture notebook ID from JSON response.
+6. **For each episode group (or single batch), execute steps 6a-6k:**
 
-10. **Persist notebook immediately:** Write notebook entry to state file with `status: pending`, `workflow: podcast`, `created: <ISO timestamp>`, `id: <notebook_id>`.
+6a. **Limit:** Truncate to `config.max_sources_per_notebook` (default 45) per episode.
 
-11. **Add sources (all-or-nothing):** For each selected lesson file, run `notebooklm source add <filepath> --notebook <notebook_id> --json`. If ANY source add fails: mark notebook as `failed` in state, report which source failed, STOP. Do NOT proceed to generation with partial sources.
+6b. **Compute hashes:** Calculate `sources_hash` (from file paths and mtimes) and `params_hash` (from format, length, language, instruction template).
 
-12. **Wait for sources ready:** Poll `notebooklm source list --notebook <notebook_id> --json` every 15 seconds until all sources have `status: ready` (timeout: 600 seconds). If any source reaches `status: error`, mark notebook as `failed` in state, report error details, STOP.
+6c. **Dedup check:** Search `state.runs` for matching `workflow + sources_hash + params_hash`. If match found, follow deduplication algorithm (session recovery, skip, re-download, or partial retry). Otherwise continue.
 
-13. **Generate audio:** Run `notebooklm generate audio "<instructions>" --format <config.podcast.format> --length <config.podcast.length> --language <config.language> --notebook <notebook_id> --json`.
+6d. **Handle empty selection:** If no files match after filtering, report "No new lessons since last podcast" and STOP.
+
+6e. **Create notebook:** Run `source <venv> && notebooklm create "MLL Podcast: <theme> YYYY-MM-DD" --json`, capture notebook ID from JSON response. For single episodes without grouping, use "MLL Podcast YYYY-MM-DD".
+
+6f. **Persist notebook immediately:** Write notebook entry to state file with `status: pending`, `workflow: podcast`, `created: <ISO timestamp>`, `id: <notebook_id>`.
+
+6g. **Add sources (all-or-nothing):** For each selected lesson file, run `source <venv> && notebooklm source add <filepath> --notebook <notebook_id> --json`. If ANY source add fails: mark notebook as `failed` in state, report which source failed, STOP. Do NOT proceed to generation with partial sources.
+
+6h. **Wait for sources ready:** Poll `source <venv> && notebooklm source list --notebook <notebook_id> --json` every 15 seconds until all sources have `status: ready` (timeout: 600 seconds). If any source reaches `status: error`, mark notebook as `failed` in state, report error details, STOP.
+
+6i. **Generate audio:** Run `source <venv> && notebooklm generate audio "<instructions>" --format <config.podcast.format> --length <config.podcast.length> --language <config.language> --notebook <notebook_id> --json`.
 
     **Audio instructions template:**
 
-    Read the prompt from `prompts/podcast-tutor.md` relative to this skill's directory (i.e. `plugins/kb/skills/kb-notebooklm/prompts/podcast-tutor.md` in the plugin repo). Append the lesson titles to the end of the prompt: "Cover these lessons: [comma-separated lesson titles]. Highlight connections between topics where they exist."
+    Read the prompt from `prompts/podcast-tutor.md` relative to this skill's directory (i.e. `plugins/kb/skills/kb-notebooklm/prompts/podcast-tutor.md` in the plugin repo). Append the lesson titles for this episode group to the end of the prompt: "Cover these lessons: [comma-separated lesson titles]. Highlight connections between topics where they exist."
 
     If the prompt file cannot be found, use this fallback:
     ```
     Cover the key concepts from these lessons: [comma-separated lesson titles]. Make it engaging and educational. Highlight connections between topics where they exist. Target audience: someone learning ML/AI concepts.
     ```
 
-14. **Get artifact ID:** Run `notebooklm artifact list --notebook <notebook_id> --json`, extract artifact ID and status from response.
+6j. **Get artifact ID and persist run record:** Run `source <venv> && notebooklm artifact list --notebook <notebook_id> --json`, extract artifact ID. Write run entry to `state.runs` with artifact `status: pending`.
 
-15. **Persist preliminary run record:** Write run entry to `state.runs` with:
-    - `workflow: podcast`
-    - `timestamp: <ISO timestamp>`
-    - `sources_hash: <computed hash>`
-    - `params_hash: <computed hash>`
-    - `notebook_id: <notebook_id>`
-    - `artifacts: [{type: audio, status: pending, output_files: []}]`
-
-16. **Spawn background agent:** Use Agent tool with `run_in_background: true` to wait and download:
+6k. **Spawn background agent:** Use Agent tool with `run_in_background: true` to wait and download:
     ```
     Wait for artifact <artifact_id> in notebook <notebook_id> to complete, then download.
-    1. Run: notebooklm artifact wait <artifact_id> -n <notebook_id> --timeout 2700
-    2. If exit code 0: Run: notebooklm download audio <output_path>/<filename> -n <notebook_id>
+    1. Run: source <venv>/bin/activate && notebooklm artifact wait <artifact_id> -n <notebook_id> --timeout 2700
+    2. If exit code 0: Run: source <venv>/bin/activate && notebooklm download audio <output_path>/<filename> -n <notebook_id>
     3. If exit code 2 (timeout): Report timeout
     4. If exit code 1 (error): Report error details
     Report the outcome (success with file path, or failure with reason).
     ```
 
     **Output filename logic:**
-    - If unfiltered: `podcast-YYYY-MM-DD.mp3`
-    - If topic-filtered: `podcast-<topic>-YYYY-MM-DD.mp3`
+    - Single episode: `podcast-YYYY-MM-DD.mp3`
+    - Grouped episodes: `podcast-<theme-slug>-YYYY-MM-DD.mp3`
+    - Topic-filtered: `podcast-<topic>-YYYY-MM-DD.mp3`
     - Saved to `config.output_path`
 
-17. **On background agent success (in main conversation after agent reports):**
+    **Parallel execution:** When multiple episode groups exist, launch all background agents in parallel (one per episode). Each episode gets its own notebook, run record, and artifact.
+
+7. **On background agent success (in main conversation after agent reports):**
     - Update artifact in run record: `status: completed`, add `output_files: [<absolute path>]`
     - Update notebook: `status: completed`
-    - **Advance watermark cursor (if unfiltered run and all artifacts OK):** Set `state.last_podcast` to `{mtime: <last file mtime>, path: <last file path>}` where "last file" is the last file in the sorted batch (oldest-first order)
+    - **Advance watermark cursor** only after ALL episodes from this invocation have completed successfully (if unfiltered run). Set `state.last_podcast` to `{mtime: <last file mtime>, path: <last file path>}` where "last file" is the last file across all episode groups in the sorted batch (oldest-first order).
     - Run auto-cleanup (see Cleanup Workflow)
     - Write updated state to file
 
