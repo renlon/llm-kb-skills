@@ -32,80 +32,11 @@ Use AskUserQuestion to inquire about the time range (e.g., last 6 months, 2024 t
 
 **Hard Constraint**: The following prompt must be strictly reproduced, only replacing variables in {xxx}, no rewriting of structure or wording allowed.
 
-Launch 1 web-search-agent (background), **Prompt Template**:
-```python
-prompt = f"""## Task
-Research Topic: {topic}
-Current Date: {YYYY-MM-DD}
+Launch 1 web-search-agent (background). Read the prompt template from `prompts/web-search-agent.md` relative to this skill's directory. Replace `{topic}`, `{YYYY-MM-DD}`, `{step1_output}`, and `{time_range}` with the collected parameters.
 
-Based on the following preliminary framework, supplement the latest items and recommended research fields.
+**Hard Constraint**: The prompt must be strictly reproduced from the template file, only replacing variables in `{xxx}`, no rewriting of structure or wording allowed.
 
-## Existing Framework
-{step1_output}
-
-## Objectives
-1. Verify if existing items miss important objects
-2. Supplement items based on missing objects
-3. Continue searching for {topic}-related items within {time_range} and supplement
-4. Supplement new fields
-
-## Output Requirements
-Return structured results directly (do not write files):
-
-### Supplemented Items
-- item_name: Brief explanation (why should it be included)
-...
-
-### Recommended Additional Fields
-- field_name: Field description (why this dimension is needed)
-...
-
-### Information Sources
-- [Source 1](url1)
-- [Source 2](url2)
-"""
-```
-
-**One-shot Example** (assuming research on AI Coding development history):
-```
-## Task
-Research Topic: AI Coding Development History
-Current Date: 2025-12-30
-
-Based on the following preliminary framework, supplement the latest items and recommended research fields.
-
-## Existing Framework
-### Items List
-1. GitHub Copilot: Developed by Microsoft/GitHub, first mainstream AI programming assistant
-2. Cursor: AI-first IDE, based on VSCode
-...
-
-### Field Framework
-- Basic Info: name, release_date, company
-- Technical Features: underlying_model, context_window
-...
-
-## Objectives
-1. Verify if existing items miss important objects
-2. Supplement items based on missing objects
-3. Continue searching for AI Coding Development History-related items within 2024 to present and supplement
-4. Supplement new fields
-
-## Output Requirements
-Return structured results directly (do not write files):
-
-### Supplemented Items
-- item_name: Brief explanation (why should it be included)
-...
-
-### Recommended Additional Fields
-- field_name: Field description (why this dimension is needed)
-...
-
-### Information Sources
-- [Source 1](url1)
-- [Source 2](url2)
-```
+**One-shot Example**: See `prompts/web-search-agent-example.md` relative to this skill's directory for a concrete example (AI Coding Development History).
 
 ### Step 3: Inquire About User's Existing Fields
 Use AskUserQuestion to ask if the user has predefined field files, read and merge if available.

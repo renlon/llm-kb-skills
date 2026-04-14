@@ -277,89 +277,13 @@ When in doubt, use **default**. A concise reference article is better than a pad
 
 #### Default Format
 
-```markdown
----
-title: "Concept Name"
-aliases: [alternate name, abbreviation]
-tags: [domain, topic]
-article_format: default
-diagram: false
-sources:
-  - "[[raw/articles/source-file.md]]"
-created: 2026-04-03
-updated: 2026-04-03
----
-
-# Concept Name
-
-Core explanation of the concept.
-
-## Details
-
-Detailed information extracted from sources.
-
-## Relationships
-
-- Related to [[Other Concept]] because...
-- Contradicts [[Conflicting Idea]] on the point of...
-- Builds on [[Foundation Concept]]
-
-## Sources
-
-- [[raw/articles/source-file.md]] -- key claims extracted from this source
-```
+Read the template from `prompts/article-default.md` relative to this skill's directory. Use it as the structure for reference-style wiki articles.
 
 #### Tutorial Format
 
 For learnable technical concepts. Follows an easy-to-hard hierarchy so the reader can enter at their level.
 
-```markdown
----
-title: "Concept Name"
-aliases: [alternate name, abbreviation]
-tags: [domain, topic]
-article_format: tutorial
-diagram: false
-sources:
-  - "[[raw/articles/source-file.md]]"
-created: 2026-04-03
-updated: 2026-04-03
----
-
-# Concept Name
-
-## Core Concept
-
-A high-level, plain-English summary. Use a beginner-friendly analogy to ground the idea before introducing any jargon.
-
-## Foundational Context
-
-Define essential vocabulary. Explain the problem this concept solves and why prior approaches fell short. Proactively address the "5 Whys" -- keep asking why until the root motivation is clear.
-
-## Technical Deep-Dive
-
-Transition into mechanics: architecture, algorithms, implementation details. Keep it accessible but rigorous. Use code blocks, diagrams (via `![[image.png]]`), and worked examples where appropriate.
-
-## Best Practices
-
-Real-world production considerations: scalability, cost, evaluation methods, common pitfalls, and failure modes. Link to related concepts via `[[wikilinks]]`.
-
-## Growth Path
-
-Practical next steps to build mastery:
-- Specific exercises or projects to try
-- Resources for further reading (link to other wiki articles or external sources)
-- Common progression from beginner to advanced usage
-
-## Relationships
-
-- Related to [[Other Concept]] because...
-- Builds on [[Foundation Concept]]
-
-## Sources
-
-- [[raw/articles/source-file.md]] -- key claims extracted from this source
-```
+Read the template from `prompts/article-tutorial.md` relative to this skill's directory. Use it as the structure for tutorial-style wiki articles.
 
 ### Index Maintenance
 

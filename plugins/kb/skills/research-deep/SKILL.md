@@ -34,54 +34,11 @@ Find `*/outline.yaml` file in current working directory, read items list and exe
 
 **Hard Constraint**: The following prompt must be strictly recited, only replace variables in {xxx}, do not rewrite structure or wording.
 
-**Prompt Template**:
-```python
-prompt = f"""## Task
-Research {item_related_info}, output structured JSON to {output_path}
+Read the prompt template from `prompts/deep-research-agent.md` relative to this skill's directory. Replace `{item_related_info}`, `{output_path}`, and `{fields_path}` with the collected parameters.
 
-## Field Definitions
-Read {fields_path} to get all field definitions
+**Hard Constraint**: The prompt must be strictly reproduced from the template file, only replacing variables in `{xxx}`, no rewriting of structure or wording allowed.
 
-## Output Requirements
-1. Output JSON according to fields defined in fields.yaml
-2. Mark uncertain field values as [不确定]
-3. Add uncertain array at end of JSON, listing all uncertain field names
-4. All field values must be output in Chinese (research process can use English, but final JSON values in Chinese)
-
-## Output Path
-{output_path}
-
-## Validation
-After completing JSON output, run validation script to ensure complete field coverage:
-python ~/.claude/skills/research/validate_json.py -f {fields_path} -j {output_path}
-Task is only complete after validation passes.
-"""
-```
-
-**One-shot Example** (assuming research on GitHub Copilot):
-```
-## Task
-Research name: GitHub Copilot
-category: International Product
-description: Developed by Microsoft/GitHub, first mainstream AI programming assistant, market share about 40%, output structured JSON to /home/weizhena/AIcoding/aicoding-history/results/GitHub_Copilot.json
-
-## Field Definitions
-Read /home/weizhena/AIcoding/aicoding-history/fields.yaml to get all field definitions
-
-## Output Requirements
-1. Output JSON according to fields defined in fields.yaml
-2. Mark uncertain field values as [不确定]
-3. Add uncertain array at end of JSON, listing all uncertain field names
-4. All field values must be output in Chinese (research process can use English, but final JSON values in Chinese)
-
-## Output Path
-/home/weizhena/AIcoding/aicoding-history/results/GitHub_Copilot.json
-
-## Validation
-After completing JSON output, run validation script to ensure complete field coverage:
-python ~/.claude/skills/research/validate_json.py -f /home/weizhena/AIcoding/aicoding-history/fields.yaml -j /home/weizhena/AIcoding/aicoding-history/results/GitHub_Copilot.json
-Task is only complete after validation passes.
-```
+**One-shot Example**: See `prompts/deep-research-agent-example.md` relative to this skill's directory for a concrete example (GitHub Copilot).
 
 ### Step 4: Wait and Monitor
 - Wait for current batch to complete

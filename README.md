@@ -59,13 +59,32 @@ All skills are installed as a single plugin.
 
 | Skill | Purpose |
 |-------|---------|
-| `kb-init` | One-time setup: scaffolds directories, generates config, writes project files |
-| `kb` | Main skill with four workflows: compile, query, lint, evolve |
-| `research` | Generate a structured research outline for a topic |
-| `research-deep` | Launch parallel agents for deep research on each outline item |
+| `kb-init` | One-time setup: scaffolds directories, generates config, installs Obsidian plugins |
+| `kb` | Main skill — compile raw sources into wiki articles, query the KB at three depth levels, lint for health issues, evolve with improvement suggestions |
+| `kb-arc` | Archive session Q&A into lesson files with intelligent merge, date rotation, and auto git-push |
+| `kb-notebooklm` | Bridge KB with Google NotebookLM — generate podcasts, quizzes, digests, reports, and research audio from lessons and wiki |
+| `research` | Generate a structured research outline (items + fields) for a topic, supplemented by web search |
+| `research-deep` | Launch parallel agents for deep per-item research, outputting validated JSON results |
 | `research-add-fields` | Add field definitions to an existing research outline |
 | `research-add-items` | Add research targets to an existing outline |
-| `research-report` | Compile deep research results into a markdown report |
+| `research-report` | Compile deep research JSON results into a formatted markdown report |
+
+## Prompt Templates
+
+Each skill stores its prompt templates as separate files under a co-located `prompts/` directory, version-controlled alongside the skill.
+
+| Skill | Prompt File | Description |
+|-------|-------------|-------------|
+| `kb` | `prompts/article-default.md` | Reference-style wiki article structure |
+| `kb` | `prompts/article-tutorial.md` | Tutorial-style wiki article with easy-to-hard hierarchy |
+| `kb-arc` | `prompts/lesson-format.md` | Session lesson file with technical summary and Q&A transcript |
+| `kb-notebooklm` | `prompts/podcast-tutor.md` | Podcast audio instructions — "Technical Lead & Mentor" teaching methodology |
+| `research` | `prompts/web-search-agent.md` | Web search agent prompt for supplementing research items and fields |
+| `research` | `prompts/web-search-agent-example.md` | One-shot example for web search agent (AI Coding topic) |
+| `research-deep` | `prompts/deep-research-agent.md` | Deep research agent prompt for per-item JSON output |
+| `research-deep` | `prompts/deep-research-agent-example.md` | One-shot example for deep research agent (GitHub Copilot) |
+
+All prompt files live under `plugins/kb/skills/<skill-name>/prompts/`.
 
 ## Directory Structure (after `/kb-init`)
 

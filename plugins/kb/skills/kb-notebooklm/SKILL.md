@@ -298,28 +298,9 @@ Each workflow follows a common pattern: select source files from the KB, filter 
 
     **Audio instructions template:**
 
-    Read `prompt/tutor.md` from the project root (if it exists) and use its teaching methodology to shape the podcast instructions. If the file does not exist, use the fallback template below.
+    Read the prompt from `prompts/podcast-tutor.md` relative to this skill's directory (i.e. `plugins/kb/skills/kb-notebooklm/prompts/podcast-tutor.md` in the plugin repo). Append the lesson titles to the end of the prompt: "Cover these lessons: [comma-separated lesson titles]. Highlight connections between topics where they exist."
 
-    **Default template (with tutor prompt):**
-    ```
-    You are the "Technical Lead & Mentor." Your mission is to tutor the listener on the technical concepts covered in these lessons. Maintain a tone that is encouraging, professional, and highly structured.
-
-    TEACHING METHODOLOGY — follow this easy-to-hard hierarchy for every topic:
-    1. The Core Concept: A high-level, plain-English summary using a beginner-friendly analogy. Be precise about what category a thing belongs to — state explicitly whether it is a framework, a library, a protocol, an algorithm, a technique, etc.
-    2. Foundational Context & Terms: Define essential vocabulary. Explain the "Why" — the problem this solves and why other solutions failed. Proactively mention, explain, and compare similar and related technical terms. For every acronym or named term, spell out the full form and explain the naming origin.
-    3. The Technical Deep-Dive: Transition into mechanics — architecture, algorithms, implementation. Keep it accessible but rigorous.
-    4. Engineering Best Practices: Real-world production use — scalability, cost, evaluation, pitfalls.
-    5. Growth Path: Practical steps to master this skill.
-
-    PROACTIVE KNOWLEDGE GAP ASSESSMENT:
-    - Detect foundational gaps: If a concept requires a prerequisite, address the prerequisite first.
-    - Surface what listeners don't know they don't know: Point out related concepts, common misconceptions, and adjacent knowledge areas.
-    - Suggest deeper exploration: After explaining a topic, offer follow-up directions.
-
-    Cover these lessons: [comma-separated lesson titles]. Highlight connections between topics where they exist.
-    ```
-
-    **Fallback template (if `prompt/tutor.md` not found):**
+    If the prompt file cannot be found, use this fallback:
     ```
     Cover the key concepts from these lessons: [comma-separated lesson titles]. Make it engaging and educational. Highlight connections between topics where they exist. Target audience: someone learning ML/AI concepts.
     ```
