@@ -1,0 +1,19 @@
+# 小宇宙 Podcaster Dashboard Selectors
+# Updated: 2026-04-15
+#
+# These selectors are best-effort. The dashboard is a closed SPA that can
+# change without notice. When selectors fail, the upload script captures a
+# screenshot and returns an error JSON so assets can be uploaded manually.
+
+new_episode_button: "button:has-text('新建单集')"
+audio_upload_input: "input[type='file'][accept*='audio']"
+audio_processing_indicator: ".upload-progress, .processing-indicator"
+title_input: "input[name='title'], input[placeholder*='标题']"
+description_input: "textarea[name='description'], textarea[placeholder*='简介']"
+cover_upload_input: "input[type='file'][accept*='image']"
+draft_button: "button:has-text('存草稿'), button:has-text('保存')"
+publish_button: "button:has-text('发布')"
+success_indicator: ".episode-detail, .success-toast"
+login_detection:
+  dashboard_url_pattern: "podcaster.xiaoyuzhoufm.com"
+  login_url_pattern: "xiaoyuzhoufm.com/login"
