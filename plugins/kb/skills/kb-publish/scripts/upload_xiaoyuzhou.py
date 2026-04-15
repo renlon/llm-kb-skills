@@ -75,16 +75,17 @@ def is_logged_in(page, selectors):
 def wait_for_login(page, selectors, timeout_s=300):
     login_detection = selectors.get("login_detection", {})
     dashboard_pattern = login_detection.get("dashboard_url_pattern", "podcaster.xiaoyuzhoufm.com")
+    login_pattern = login_detection.get("login_url_pattern", "xiaoyuzhoufm.com/login")
     print("请在浏览器中登录小宇宙。登录完成后脚本将自动继续。", file=sys.stderr)
     deadline = time.time() + timeout_s
     while time.time() < deadline:
-        if dashboard_pattern in page.url:
+        if dashboard_pattern in page.url and login_pattern not in page.url:
             return True
         time.sleep(2)
     return False
 
 
-def navigate_with_retry(page, url, selectors):
+def navigate_with_retry(page, url):
     for attempt in range(2):
         try:
             page.goto(url, wait_until="networkidle", timeout=30000)
@@ -120,7 +121,7 @@ def main():
         page = context.new_page()
 
         try:
-            navigate_with_retry(page, args.dashboard_url, selectors)
+            navigate_with_retry(page, args.dashboard_url)
         except Exception as e:
             browser.close()
             output_result({
@@ -130,6 +131,7 @@ def main():
                 "dashboard_url": args.dashboard_url,
                 "staging_dir": args.staging_dir,
             })
+            return  # output_result calls sys.exit, but return for clarity
 
         # Phase 2: Auth check
         if not is_logged_in(page, selectors):
@@ -138,7 +140,7 @@ def main():
             browser = p.chromium.launch(headless=False)
             context = browser.new_context()
             page = context.new_page()
-            navigate_with_retry(page, args.dashboard_url, selectors)
+            navigate_with_retry(page, args.dashboard_url)
 
             if not wait_for_login(page, selectors, timeout_s=300):
                 screenshot = capture_screenshot(page, args.staging_dir, "login_timeout")
@@ -150,6 +152,7 @@ def main():
                     "dashboard_url": args.dashboard_url,
                     "staging_dir": args.staging_dir,
                 })
+                return
 
             save_cookies(context, args.cookies)
             print("登录成功，cookies已保存。", file=sys.stderr)
@@ -184,6 +187,7 @@ def main():
                     "dashboard_url": args.dashboard_url,
                     "staging_dir": args.staging_dir,
                 })
+                return
 
             # Fill title
             title_input = page.locator(selectors["title_input"]).first
@@ -230,6 +234,7 @@ def main():
                     "dashboard_url": args.dashboard_url,
                     "staging_dir": args.staging_dir,
                 })
+                return
 
             browser.close()
 

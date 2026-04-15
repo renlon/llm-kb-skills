@@ -54,6 +54,10 @@ def main():
         with open(args.prompt_file, "r", encoding="utf-8") as f:
             prompt = f.read().strip()
 
+    if not prompt:
+        print("Prompt is empty (either --prompt was blank or --prompt-file contained no text)", file=sys.stderr)
+        sys.exit(1)
+
     last_error = None
     for attempt in range(2):
         try:
