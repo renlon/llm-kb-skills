@@ -1,4 +1,8 @@
-Generate a podcast cover image with these brand guidelines:
+Generate a podcast cover image for the show "全栈AI" (Full-Stack AI) with these brand guidelines:
+
+**Show Identity:**
+- "全栈AI" is a podcast covering AI/ML topics across the full stack — from theory to production
+- Each episode focuses on a specific technical topic within the AI/ML domain
 
 **Visual Style:**
 - Clean, modern, minimalist design
