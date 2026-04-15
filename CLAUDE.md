@@ -68,6 +68,7 @@ Before every `git push` to remote:
 - `research-report` -- Summarize deep research results into a markdown report.
 - `kb-arc` -- Archive session Q&A into MLL lessons with intelligent merge and auto git-push.
 - `kb-excalidraw` -- Diagram engine: generates Excalidraw JSON from concept descriptions. Used by `/kb diagram`, compile Phase 3.5, and `kb-arc`.
+- `kb-publish` -- Publish podcast episodes to 小宇宙FM with auto-generated Chinese title/description and Gemini cover art.
 
 ## Formatting Rules (Obsidian-Compatible)
 
