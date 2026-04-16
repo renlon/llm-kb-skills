@@ -28,7 +28,12 @@ No build step, test suite, or linter -- the project is pure SKILL.md prompts and
 
 ### Plugin Structure
 
-Single plugin (`kb`) registered via `plugins/kb/.claude-plugin/plugin.json`. Skills are SKILL.md files with YAML frontmatter (name, description, triggers) followed by structured prompts Claude executes verbatim.
+Single plugin (`kb`) registered via `plugins/kb/.claude-plugin/plugin.json` (version source of truth). Top-level `.claude-plugin/marketplace.json` registers the repo in the Claude Code marketplace.
+
+Skills are SKILL.md files with YAML frontmatter (name, description, triggers) followed by structured prompts Claude executes verbatim. Each skill lives in its own directory under `plugins/kb/skills/` and may contain:
+- `prompts/` -- Reusable prompt templates referenced by the SKILL.md.
+- `references/` -- Static reference docs (schemas, color palettes, CSS selectors).
+- `scripts/` -- Python scripts for automation (validation, cover art generation, browser upload).
 
 ### Key Patterns
 
@@ -68,7 +73,9 @@ Before every `git push` to remote:
 - `research-report` -- Summarize deep research results into a markdown report.
 - `kb-arc` -- Archive session Q&A into MLL lessons with intelligent merge and auto git-push.
 - `kb-excalidraw` -- Diagram engine: generates Excalidraw JSON from concept descriptions. Used by `/kb diagram`, compile Phase 3.5, and `kb-arc`.
-- `kb-publish` -- Publish podcast episodes to 小宇宙FM with auto-generated Chinese title/description and Gemini cover art.
+- `kb-notebooklm` -- Bridge KB to Google NotebookLM for podcasts, quizzes, digests, reports. Before podcast generation, cross-checks published episodes to avoid duplicate content and injects series bible into prompt for episode-to-episode continuity.
+- `kb-publish` -- Publish podcast episodes to 小宇宙FM. Assigns episode IDs from shared registry, generates 口语化 titles with EP prefix, creates cover art via Gemini (大气/简约/接地气 style), uploads via Playwright persistent context. Writes content manifest to episodes.yaml after upload.
+- `kb-x-setup` -- Configure automated X/Twitter ingestion via Smaug into `raw/articles/x/`.
 
 ## Formatting Rules (Obsidian-Compatible)
 
@@ -91,6 +98,13 @@ Before every `git push` to remote:
 - Never include credentials, API keys, tokens, passwords, or session cookies in any file. If a credential is needed at runtime, reference it via environment variable or `kb.yaml` (which should be gitignored in user projects).
 - If raw source material contains personal information or credentials, redact them before compiling into the wiki.
 - Never log or echo secrets in bash commands or subagent prompts.
+
+## Documentation
+
+- `docs/CODE_WALKTHROUGH.md` -- Guided tour of the codebase for new contributors.
+- `docs/plans/` -- Original design and implementation documents.
+- `docs/superpowers/specs/` -- Feature design specs (brainstorming output).
+- `docs/superpowers/plans/` -- Feature implementation plans.
 
 ## Model Strategy
 
