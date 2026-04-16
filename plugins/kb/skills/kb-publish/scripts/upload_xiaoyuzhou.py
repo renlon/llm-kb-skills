@@ -212,21 +212,55 @@ def main():
 
             # --- Step 6: Agreement checkbox ---
             log("Checking agreement...")
+            checked = False
+            # Strategy 1: click the checkbox input directly
             try:
-                agreement = page.locator(selectors["agreement_text"]).first
-                if agreement.is_visible(timeout=3000):
-                    bbox = agreement.bounding_box()
-                    if bbox:
-                        page.mouse.click(bbox["x"] - 20, bbox["y"] + bbox["height"] / 2)
-                        log("Agreement checked.")
+                cb = page.locator("input[type='checkbox']").last
+                if cb.is_visible(timeout=2000):
+                    cb.check(force=True)
+                    checked = True
+                    log("Agreement checked (checkbox input).")
             except Exception:
+                pass
+            # Strategy 2: click to the left of the agreement text
+            if not checked:
                 try:
-                    page.locator("input[type='checkbox']").first.check()
+                    agreement = page.locator(selectors["agreement_text"]).first
+                    if agreement.is_visible(timeout=2000):
+                        bbox = agreement.bounding_box()
+                        if bbox:
+                            page.mouse.click(bbox["x"] - 15, bbox["y"] + bbox["height"] / 2)
+                            checked = True
+                            log("Agreement checked (text click).")
                 except Exception:
                     pass
+            # Strategy 3: click the label/span containing the agreement text
+            if not checked:
+                try:
+                    page.locator("text=阅读并同意").first.click()
+                    checked = True
+                    log("Agreement checked (label click).")
+                except Exception:
+                    pass
+            if not checked:
+                log("WARNING: Could not check agreement checkbox. Submit may fail.")
 
             # --- Step 6b: Select publish mode ---
-            if args.mode == "publish":
+            # The platform may pre-select "立即发布" by default.
+            # For draft mode: ensure "定时发布" is selected (which effectively saves as draft
+            # since no time is set), or deselect "立即发布" if possible.
+            if args.mode == "draft":
+                log("Draft mode — checking if 立即发布 is pre-selected...")
+                try:
+                    # Click 定时发布 to deselect 立即发布
+                    scheduled_btn = page.locator(selectors["publish_scheduled"]).first
+                    if scheduled_btn.is_visible(timeout=2000):
+                        scheduled_btn.click()
+                        page.wait_for_timeout(500)
+                        log("Switched to 定时发布 (draft mode).")
+                except Exception:
+                    log("WARNING: Could not switch publish mode. May publish immediately.")
+            else:
                 log("Selecting publish mode...")
                 try:
                     publish_btn = page.locator(selectors["publish_now"]).first
