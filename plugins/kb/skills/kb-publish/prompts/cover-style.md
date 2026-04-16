@@ -1,21 +1,20 @@
-Generate a podcast cover image for the show "全栈AI" (Full-Stack AI) with these brand guidelines:
+Generate a podcast cover image for the show "全栈AI" (Full-Stack AI).
 
-**Show Identity:**
-- "全栈AI" is a podcast covering AI/ML topics across the full stack — from theory to production
-- Each episode focuses on a specific technical topic within the AI/ML domain
+**Style requirements (核心风格要求):**
+- 大气 (grand, impressive) — bold visual impact, confident composition, not timid or cluttered
+- 简约 (minimalist) — clean lines, limited color palette, generous negative space
+- 接地气 (down-to-earth, relatable) — approachable, not overly abstract or academic
+- 吸引人 (eye-catching) — strong focal point that stands out at thumbnail size
+- 和这期节目贴切 (relevant to the episode topic) — visual metaphor should clearly connect to the subject
 
-**Visual Style:**
-- Clean, modern, minimalist design
-- Dark background (deep navy #1a1a2e or charcoal #16213e)
-- Accent color: warm gradient (coral #e94560 to gold #f5a623)
-- Abstract geometric shapes or subtle tech-inspired patterns
+**Visual direction:**
+- Dark background (deep navy or charcoal)
+- Warm accent colors (coral, amber, gold gradients)
+- Central visual element representing the topic: {topic}
+- No text in the image — keep it purely visual
+- 1400x1400 square format, must look good as a small podcast thumbnail
 
-**Layout:**
-- Central visual element representing the episode topic: {topic}
-- No text in the image (title overlay is handled by the podcast platform)
-- Balanced composition suitable for small thumbnail display (1400x1400)
-
-**Mood:** Professional yet approachable, intellectual curiosity
+**Mood:** Professional yet approachable, intellectual curiosity, technical depth made accessible
 
 **Topic for this episode:** {topic}
 **Key concepts:** {concepts}
