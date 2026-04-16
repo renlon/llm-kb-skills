@@ -223,6 +223,146 @@ print(hashlib.sha256('\n'.join(entries).encode()).hexdigest())
 
 **Partial retry:** Reuse existing notebook if accessible, skip completed artifacts, re-generate only failed ones. If notebook no longer accessible, recreate notebook and re-add sources.
 
+## Episode Continuity
+
+When generating podcasts, the skill maintains continuity with previously published episodes
+via the episode registry managed by kb-publish.
+
+### Episode Registry
+
+**Location:** Read `integrations.xiaoyuzhou.episodes_registry` from `kb.yaml`. If the key
+is missing or the file doesn't exist, skip all continuity features (graceful degradation).
+
+**Schema:** See kb-publish SKILL.md for the full schema. The fields relevant to
+kb-notebooklm are:
+
+- `episodes[].id` — episode number
+- `episodes[].title` — published title
+- `episodes[].topic` — short English topic label
+- `episodes[].depth` — intro | intermediate | deep-dive
+- `episodes[].concepts_covered[]` — list of {name, depth} pairs
+- `episodes[].open_threads[]` — topics hinted at but not covered
+- `episodes[].source_lessons[]` — lesson file basenames used
+
+### Published Topic Cross-Check (Podcast Workflow Step 5b)
+
+After topic grouping (Step 5) and before generation (Step 6), cross-check each
+proposed episode group against the published episodes:
+
+1. For each proposed episode group, extract its key concepts (from lesson titles
+   and first 10 lines of each lesson).
+2. Compare against `episodes[].concepts_covered[].name` across all published episodes.
+3. Classify the relationship:
+
+   - **No overlap:** Proceed normally.
+   - **Partial overlap (new angle):** Some concepts overlap but the new lessons go deeper
+     or cover adjacent material. Recommend as a follow-up/deep-dive episode.
+   - **High overlap:** Most concepts already covered at similar depth. Recommend skipping
+     or combining with genuinely new material.
+   - **Addresses open thread:** The new lessons cover a topic listed in a published
+     episode's `open_threads`. Flag positively.
+
+4. Present findings to the user:
+
+   ```
+   Episode group "Attention 进阶" — cross-check with published episodes:
+
+   ✓ Addresses EP2 open thread: "Flash Attention"
+   ✓ Addresses EP2 open thread: "KV Cache optimization"
+   ⚠ Partial overlap with EP2: "Self-Attention" was explained at intro level
+     → Recommend: frame as deep-dive, reference EP2 for basics
+
+   Proposed approach:
+   - Include: lesson-045-flash-attention.md, lesson-046-kv-cache.md
+   - Exclude: lesson-047-attention-basics.md (covered in EP2 at same depth)
+   - Frame as: EP2 deep-dive follow-up
+
+   Proceed? (y/adjust/skip)
+   ```
+
+### Series Bible Compilation (Podcast Workflow Step 6i)
+
+Before generating audio, compile a series bible from **published episodes only**
+(not `generated` or `draft` entries — those are pre-publication and may never ship):
+
+1. Read `episodes.yaml`.
+2. For each entry with `status: published`, extract: id, topic, depth, concepts_covered
+   (names only), open_threads. Use `topic` (not `title`) in the bible to avoid the
+   `EP2: EP2 | ...` duplication.
+3. Format as a series bible block (see below).
+4. Read `prompts/podcast-tutor.md`. Replace `{series_context}` with the compiled bible.
+   If no published episodes exist, replace with empty string.
+
+**Series bible format:**
+
+```
+SERIES CONTINUITY — "全栈AI" Podcast
+
+The following PUBLISHED episodes have established knowledge with the audience.
+Build on prior content instead of repeating it.
+(The episode number for THIS episode will be assigned at publish time.)
+
+EP1: {topic} ({depth})
+  Covered: {comma-separated concept names}
+  Open threads: {comma-separated open threads}
+
+EP2: {topic} ({depth})
+  Covered: {comma-separated concept names}
+  Open threads: {comma-separated open threads}
+
+RULES FOR THIS EPISODE:
+- If a concept was EXPLAINED in a previous episode, DO NOT re-explain it from scratch.
+  Instead say: "我们在第N期详细讲过这个，还没听过的朋友可以回去听一下"
+  Then build on top of it with new depth or a new angle.
+- If a concept was only MENTIONED (not explained), you may briefly recap (1-2 sentences)
+  before going deeper.
+- If this episode is a deep-dive on a previous intro topic, explicitly frame it:
+  "上次我们聊了X的基础，今天我们要更深入地看看..."
+- When addressing an open thread from a previous episode, call it out:
+  "上次留了个悬念说要聊X，今天我们来填这个坑"
+- Always reference specific episode numbers so listeners can navigate the series.
+```
+
+**Series bible length management:**
+
+- For 10 or fewer published episodes: include full detail for all episodes.
+- For 11-30 episodes: full detail for the 5 most recent, summarized (`topic` + `depth` only) for older episodes.
+- For 30+ episodes: full detail for 5 most recent, summarize the rest as topic clusters (e.g., "EP1-EP8 covered foundational ML: GPU computing, attention, transformers, ...").
+
+### Sidecar Manifest Generation (Post-Generation)
+
+After podcast generation completes, `kb-notebooklm` writes a sidecar manifest alongside the
+generated audio file. **It does NOT write to `episodes.yaml`** — that is `kb-publish`'s
+responsibility (single-writer rule).
+
+1. After podcast generation completes (Step 7), read the source lesson files.
+2. Extract: key concepts (from headings and content), estimate depth per concept,
+   identify topics mentioned but not deeply covered (open threads).
+3. Write to `<audio_path>.manifest.yaml` (e.g., `output/notebooklm/podcast-attention-2026-04-20.mp3.manifest.yaml`).
+
+**Sidecar schema:**
+
+```yaml
+audio: podcast-attention-2026-04-20.mp3
+topic: "Flash Attention & KV Cache"
+notebook_id: "uuid"
+generated_date: 2026-04-20
+depth: intermediate
+concepts_covered:
+  - name: "Flash Attention"
+    depth: explained
+  - name: "KV Cache Optimization"
+    depth: explained
+open_threads:
+  - "Multi-Query Attention"
+source_lessons:
+  - lesson-045-flash-attention.md
+  - lesson-046-kv-cache.md
+```
+
+When `kb-publish` processes this audio file, it reads the sidecar, merges the content manifest
+into the registry entry, and deletes the sidecar after successful consumption.
+
 ## Source Count Limits
 
 **Selection order:** Oldest-first. Incremental workflows sort by mtime ascending, take first `max_sources_per_notebook` (default 45, configurable in `kb.yaml`).
@@ -314,6 +454,8 @@ Each workflow follows a common pattern: select source files from the KB, filter 
 
    If 10 or fewer lessons, skip grouping — proceed as a single episode.
 
+5b. **Published topic cross-check:** If episode registry is available (see Episode Continuity section), run the cross-check against published episodes. Present overlap findings to the user and wait for confirmation before proceeding to generation.
+
 6. **For each episode group (or single batch), execute steps 6a-6k:**
 
 6a. **Limit:** Truncate to `config.max_sources_per_notebook` (default 45) per episode.
@@ -336,7 +478,16 @@ Each workflow follows a common pattern: select source files from the KB, filter 
 
     **Audio instructions template:**
 
-    Read the prompt from `prompts/podcast-tutor.md` relative to this skill's directory (i.e. `plugins/kb/skills/kb-notebooklm/prompts/podcast-tutor.md` in the plugin repo). Append the lesson titles for this episode group to the end of the prompt: "Cover these lessons: [comma-separated lesson titles]. Highlight connections between topics where they exist."
+    Read the prompt from `prompts/podcast-tutor.md` relative to this skill's directory.
+
+    **Series bible injection:** If the episode registry exists and contains published
+    episodes, compile the series bible (see "Episode Continuity" section) and replace
+    the `{series_context}` placeholder in the prompt. If no registry or no published
+    episodes, replace `{series_context}` with an empty string.
+
+    **Lesson list injection:** Replace the `{lesson_list}` placeholder with:
+    "Cover these lessons: [comma-separated lesson titles]. Highlight connections
+    between topics where they exist."
 
     If the prompt file cannot be found, use this fallback:
     ```
@@ -369,6 +520,13 @@ Each workflow follows a common pattern: select source files from the KB, filter 
     - **Advance watermark cursor** only after ALL episodes from this invocation have completed successfully (if unfiltered run). Set `state.last_podcast` to `{mtime: <last file mtime>, path: <last file path>}` where "last file" is the last file across all episode groups in the sorted batch (oldest-first order).
     - Run auto-cleanup (see Cleanup Workflow)
     - Write updated state to file
+    - **Write sidecar manifest:** Write `<audio_path>.manifest.yaml` alongside the generated
+      MP3 file. Include: `audio` (filename), `topic` (short English topic label derived from
+      the lesson group name), `notebook_id`, `generated_date`, `depth` estimated from source
+      lesson complexity, `concepts_covered` extracted from source lesson headings and content,
+      `open_threads` from related topics mentioned but not deeply covered, and `source_lessons`
+      as the basenames of the lesson files used. **Do NOT write to `episodes.yaml`** — that is
+      `kb-publish`'s responsibility (single-writer rule).
 
 **Session recovery:** If a future invocation finds a run with artifact `status: pending`, check artifact status via `notebooklm artifact list -n <notebook_id> --json`. If `completed`, download and finalize. If `in_progress`, re-wait. If `failed`, mark accordingly.
 

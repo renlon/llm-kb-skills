@@ -1,5 +1,12 @@
 #!/usr/bin/env python3
-"""Upload a podcast episode to 小宇宙FM via Playwright browser automation."""
+"""Upload a podcast episode to 小宇宙FM via Playwright browser automation.
+
+Uses persistent browser context for login state persistence:
+- First run: headed browser, user logs in manually, state saved to disk
+- Subsequent runs: automatic, no login needed
+
+Audio and cover uploads use expect_file_chooser() to intercept native file dialogs.
+"""
 
 import argparse
 import json
@@ -13,7 +20,10 @@ from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeo
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Upload episode to 小宇宙FM")
-    parser.add_argument("--cookies", required=True, help="Path to cookies JSON file")
+    parser.add_argument("--browser-data", default=None,
+                        help="Path to persistent browser context directory (preferred)")
+    parser.add_argument("--cookies", default=None,
+                        help="Path to cookies JSON file (legacy fallback)")
     parser.add_argument("--audio", required=True, help="Path to audio file")
     parser.add_argument("--cover", default=None, help="Path to cover image (optional)")
     title_group = parser.add_mutually_exclusive_group(required=True)
@@ -24,28 +34,16 @@ def parse_args():
     desc_group.add_argument("--description-file", help="Path to file containing the description")
     parser.add_argument("--dashboard-url", required=True, help="小宇宙 dashboard URL")
     parser.add_argument("--selectors", required=True, help="Path to selectors YAML file")
-    parser.add_argument("--staging-dir", required=True, help="Path to staging directory for screenshots")
-    parser.add_argument("--mode", choices=["draft", "publish"], default="draft", help="Save as draft or publish")
+    parser.add_argument("--staging-dir", required=True,
+                        help="Path to staging directory for screenshots")
+    parser.add_argument("--mode", choices=["draft", "publish"], default="draft",
+                        help="Save as draft or publish immediately")
     return parser.parse_args()
 
 
 def load_selectors(path):
     with open(path, "r", encoding="utf-8") as f:
         return yaml.safe_load(f)
-
-
-def load_cookies(path):
-    if not os.path.exists(path):
-        return []
-    with open(path, "r", encoding="utf-8") as f:
-        return json.load(f)
-
-
-def save_cookies(context, path):
-    cookies = context.cookies()
-    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(cookies, f, ensure_ascii=False, indent=2)
 
 
 def output_result(result):
@@ -56,52 +54,27 @@ def output_result(result):
 def capture_screenshot(page, staging_dir, name="error"):
     path = os.path.join(staging_dir, f"{name}.png")
     try:
-        page.screenshot(path=path)
+        page.screenshot(path=path, full_page=True)
     except Exception:
         path = None
     return path
 
 
-def is_logged_in(page, selectors):
-    login_detection = selectors.get("login_detection", {})
-    dashboard_pattern = login_detection.get("dashboard_url_pattern", "podcaster.xiaoyuzhoufm.com")
-    login_pattern = login_detection.get("login_url_pattern", "xiaoyuzhoufm.com/login")
-    # Explicitly check for login redirect first
-    if login_pattern in page.url:
-        return False
-    return dashboard_pattern in page.url
+def get_url(page):
+    """Get current URL via JS (SPA-safe)."""
+    try:
+        return page.evaluate("window.location.href")
+    except Exception:
+        return page.url
 
 
-def wait_for_login(page, selectors, timeout_s=300):
-    login_detection = selectors.get("login_detection", {})
-    dashboard_pattern = login_detection.get("dashboard_url_pattern", "podcaster.xiaoyuzhoufm.com")
-    login_pattern = login_detection.get("login_url_pattern", "xiaoyuzhoufm.com/login")
-    print("请在浏览器中登录小宇宙。登录完成后脚本将自动继续。", file=sys.stderr)
-    deadline = time.time() + timeout_s
-    while time.time() < deadline:
-        if dashboard_pattern in page.url and login_pattern not in page.url:
-            return True
-        time.sleep(2)
-    return False
-
-
-def navigate_with_retry(page, url):
-    for attempt in range(2):
-        try:
-            page.goto(url, wait_until="networkidle", timeout=30000)
-            return
-        except Exception as e:
-            if attempt == 0:
-                print(f"Navigation failed: {e}. Retrying...", file=sys.stderr)
-                time.sleep(2)
-            else:
-                raise
+def log(msg):
+    print(f">>> {msg}", file=sys.stderr, flush=True)
 
 
 def main():
     args = parse_args()
 
-    # Resolve title and description from inline args or files
     if args.title_file:
         with open(args.title_file, "r", encoding="utf-8") as f:
             args.title = f.read().strip()
@@ -110,157 +83,201 @@ def main():
             args.description = f.read().strip()
 
     selectors = load_selectors(args.selectors)
-    cookies = load_cookies(args.cookies)
 
     with sync_playwright() as p:
-        # Phase 1: Try headless with cookies
-        browser = p.chromium.launch(headless=True)
-        context = browser.new_context()
-        if cookies:
-            context.add_cookies(cookies)
-        page = context.new_page()
-
-        try:
-            navigate_with_retry(page, args.dashboard_url)
-        except Exception as e:
-            browser.close()
-            output_result({
-                "success": False,
-                "error": f"Navigation failed: {e}",
-                "screenshot": None,
-                "dashboard_url": args.dashboard_url,
-                "staging_dir": args.staging_dir,
-            })
-            return  # output_result calls sys.exit, but return for clarity
-
-        # Phase 2: Auth check
-        if not is_logged_in(page, selectors):
-            browser.close()
-            # Relaunch headed for manual login
+        # --- Browser setup ---
+        if args.browser_data:
+            os.makedirs(args.browser_data, exist_ok=True)
+            context = p.chromium.launch_persistent_context(
+                args.browser_data, headless=False,
+                viewport={"width": 1280, "height": 900})
+            page = context.new_page()
+            use_persistent = True
+        else:
+            # Legacy fallback: launch + cookies
             browser = p.chromium.launch(headless=False)
             context = browser.new_context()
+            if args.cookies and os.path.exists(args.cookies):
+                with open(args.cookies, "r") as f:
+                    cookies = json.load(f)
+                if cookies:
+                    context.add_cookies(cookies)
             page = context.new_page()
-            navigate_with_retry(page, args.dashboard_url)
+            use_persistent = False
 
-            if not wait_for_login(page, selectors, timeout_s=300):
-                screenshot = capture_screenshot(page, args.staging_dir, "login_timeout")
-                browser.close()
-                output_result({
-                    "success": False,
-                    "error": "Login timed out after 300s",
-                    "screenshot": screenshot,
-                    "dashboard_url": args.dashboard_url,
-                    "staging_dir": args.staging_dir,
-                })
+        # --- Navigate ---
+        page.goto(args.dashboard_url, wait_until="networkidle", timeout=30000)
+        current_url = get_url(page)
+        log(f"Current page: {current_url}")
+
+        # --- Login check ---
+        if "/login" in current_url.lower():
+            log("Please log in to 小宇宙 in the browser window. "
+                "This is only needed once with persistent context.")
+            deadline = time.time() + 600
+            while time.time() < deadline:
+                cur = get_url(page)
+                if "/login" not in cur.lower() and "podcaster.xiaoyuzhoufm.com" in cur:
+                    log(f"Login detected: {cur}")
+                    break
+                time.sleep(2)
+            else:
+                capture_screenshot(page, args.staging_dir, "login_timeout")
+                context.close()
+                output_result({"success": False, "error": "Login timed out (600s)",
+                               "dashboard_url": args.dashboard_url,
+                               "staging_dir": args.staging_dir})
                 return
-
-            save_cookies(context, args.cookies)
-            print("登录成功，cookies已保存。", file=sys.stderr)
+            page.goto(args.dashboard_url, wait_until="networkidle", timeout=30000)
         else:
-            # Refresh cookies on successful headless auth
-            save_cookies(context, args.cookies)
+            log("Already logged in.")
+            if "contents-management/episodes" not in current_url:
+                page.goto(args.dashboard_url, wait_until="networkidle", timeout=30000)
 
-        # Phase 3: Create episode (no retries after this point)
+        page.wait_for_timeout(2000)
+
         try:
-            # Click new episode button
-            page.click(selectors["new_episode_button"], timeout=10000)
-            page.wait_for_load_state("networkidle", timeout=15000)
-
-            # Upload audio
-            audio_input = page.locator(selectors["audio_upload_input"])
-            audio_input.set_input_files(args.audio)
-            # Wait for processing to complete (up to 600s for large files)
-            processing = selectors.get("audio_processing_indicator", ".upload-progress")
-            try:
-                page.wait_for_selector(processing, state="visible", timeout=10000)
-            except PlaywrightTimeout:
-                pass  # Processing indicator might not appear for small files
-            try:
-                page.wait_for_selector(processing, state="hidden", timeout=600000)
-            except PlaywrightTimeout:
-                screenshot = capture_screenshot(page, args.staging_dir, "audio_timeout")
-                browser.close()
-                output_result({
-                    "success": False,
-                    "error": "Audio upload/processing timed out after 600s",
-                    "screenshot": screenshot,
-                    "dashboard_url": args.dashboard_url,
-                    "staging_dir": args.staging_dir,
-                })
-                return
-
-            # Fill title
-            title_input = page.locator(selectors["title_input"]).first
-            title_input.fill(args.title)
-
-            # Fill description
-            desc_input = page.locator(selectors["description_input"]).first
-            desc_input.fill(args.description)
-
-            # Upload cover (optional)
-            if args.cover and os.path.exists(args.cover):
-                cover_input = page.locator(selectors["cover_upload_input"])
-                cover_input.set_input_files(args.cover)
-                page.wait_for_timeout(3000)  # Wait for cover upload
-
-            # Save/publish
-            if args.mode == "draft":
-                page.click(selectors["draft_button"], timeout=10000)
-            else:
-                page.click(selectors["publish_button"], timeout=10000)
-
-            # Wait for confirmation: success indicator OR URL change
-            pre_save_url = page.url
+            # --- Step 1: Click "创建单集" ---
+            log("Clicking create episode...")
+            page.locator(selectors["new_episode_button"]).first.click()
             page.wait_for_timeout(3000)
-            success_sel = selectors.get("success_indicator", ".success-toast")
-            confirmed = False
-            try:
-                page.wait_for_selector(success_sel, state="visible", timeout=10000)
-                confirmed = True
-            except PlaywrightTimeout:
-                # Check if URL changed (some dashboards redirect on success)
-                if page.url != pre_save_url:
-                    confirmed = True
 
-            current_url = page.url
+            # --- Step 2: Upload audio via file chooser ---
+            log(f"Uploading audio: {os.path.basename(args.audio)}")
+            with page.expect_file_chooser(timeout=10000) as fc_info:
+                page.locator(selectors["audio_upload_text"]).first.click()
+            fc_info.value.set_files(args.audio)
+            log("Audio file selected, waiting for processing...")
 
-            if not confirmed:
-                screenshot = capture_screenshot(page, args.staging_dir, "unconfirmed")
-                browser.close()
-                output_result({
-                    "success": False,
-                    "error": "Save/publish action did not produce a confirmation signal",
-                    "screenshot": screenshot,
-                    "dashboard_url": args.dashboard_url,
-                    "staging_dir": args.staging_dir,
-                })
+            # Wait for audio processing (duration display indicates completion)
+            audio_ready = False
+            for i in range(120):  # up to 10 minutes
+                page.wait_for_timeout(5000)
+                try:
+                    if page.locator("text=/\\d{2,}:\\d{2}/").first.is_visible(timeout=1000):
+                        log("Audio upload complete.")
+                        audio_ready = True
+                        break
+                except Exception:
+                    pass
+                if i % 12 == 0 and i > 0:
+                    log(f"  Still processing... ({(i+1)*5}s)")
+            if not audio_ready:
+                capture_screenshot(page, args.staging_dir, "audio_timeout")
+                context.close()
+                output_result({"success": False,
+                               "error": "Audio processing timed out (600s). "
+                                        "File may be too large or upload failed.",
+                               "dashboard_url": args.dashboard_url,
+                               "staging_dir": args.staging_dir})
                 return
 
-            browser.close()
+            # --- Step 3: Fill title ---
+            log(f"Filling title: {args.title}")
+            page.locator(selectors["title_input"]).first.fill(args.title)
 
-            if args.mode == "draft":
-                output_result({
-                    "success": True,
-                    "mode": "draft",
-                    "dashboard_url": args.dashboard_url,
-                })
+            # --- Step 4: Fill show notes ---
+            log("Filling show notes...")
+            desc_selectors = selectors.get("description_editor", ["[contenteditable='true']"])
+            if isinstance(desc_selectors, str):
+                desc_selectors = [desc_selectors]
+            for sel in desc_selectors:
+                try:
+                    editor = page.locator(sel).first
+                    if editor.is_visible(timeout=2000):
+                        editor.click()
+                        page.keyboard.type(args.description, delay=10)
+                        log("Show notes filled.")
+                        break
+                except Exception:
+                    continue
+
+            # --- Step 5: Upload cover (optional) ---
+            if args.cover and os.path.exists(args.cover):
+                log("Uploading cover...")
+                with page.expect_file_chooser(timeout=10000) as fc_info:
+                    page.locator(selectors["cover_upload_text"]).first.click()
+                fc_info.value.set_files(args.cover)
+                page.wait_for_timeout(3000)
+
+                # Handle crop dialog
+                try:
+                    crop_btn = page.locator(selectors["cover_crop_confirm"]).first
+                    if crop_btn.is_visible(timeout=8000):
+                        crop_btn.click()
+                        log("Cover crop confirmed.")
+                        page.wait_for_timeout(3000)
+                except Exception:
+                    pass
+
+            # --- Step 6: Agreement checkbox ---
+            log("Checking agreement...")
+            try:
+                agreement = page.locator(selectors["agreement_text"]).first
+                if agreement.is_visible(timeout=3000):
+                    bbox = agreement.bounding_box()
+                    if bbox:
+                        page.mouse.click(bbox["x"] - 20, bbox["y"] + bbox["height"] / 2)
+                        log("Agreement checked.")
+            except Exception:
+                try:
+                    page.locator("input[type='checkbox']").first.check()
+                except Exception:
+                    pass
+
+            # --- Step 6b: Select publish mode ---
+            if args.mode == "publish":
+                log("Selecting publish mode...")
+                try:
+                    publish_btn = page.locator(selectors["publish_now"]).first
+                    publish_btn.click(timeout=5000)
+                    page.wait_for_timeout(500)
+                except Exception as e:
+                    capture_screenshot(page, args.staging_dir, "publish_mode_fail")
+                    context.close()
+                    output_result({"success": False,
+                                   "error": f"Failed to select publish mode: {e}. "
+                                            "Episode NOT submitted — use --mode draft if intended.",
+                                   "dashboard_url": args.dashboard_url,
+                                   "staging_dir": args.staging_dir})
+                    return
+
+            page.wait_for_timeout(1000)
+            capture_screenshot(page, args.staging_dir, "before_submit")
+
+            # --- Step 7: Click "创建" ---
+            log(f"Clicking create (mode={args.mode})...")
+            page.locator(selectors["create_button"]).last.click()
+
+            # Wait for result
+            page.wait_for_timeout(8000)
+            episode_url = get_url(page)
+            capture_screenshot(page, args.staging_dir, "final")
+
+            if "create/episode" not in episode_url:
+                log("Episode created successfully!")
+                output_result({"success": True, "mode": args.mode,
+                               "dashboard_url": args.dashboard_url,
+                               "episode_url": episode_url})
             else:
-                output_result({
-                    "success": True,
-                    "mode": "publish",
-                    "episode_url": current_url,
-                })
+                capture_screenshot(page, args.staging_dir, "unconfirmed")
+                output_result({"success": False, "error": "Still on create page after submit",
+                               "dashboard_url": args.dashboard_url,
+                               "episode_url": episode_url,
+                               "staging_dir": args.staging_dir})
 
         except Exception as e:
-            screenshot = capture_screenshot(page, args.staging_dir, "error")
-            browser.close()
-            output_result({
-                "success": False,
-                "error": str(e),
-                "screenshot": screenshot,
-                "dashboard_url": args.dashboard_url,
-                "staging_dir": args.staging_dir,
-            })
+            capture_screenshot(page, args.staging_dir, "error")
+            output_result({"success": False, "error": str(e),
+                           "dashboard_url": args.dashboard_url,
+                           "staging_dir": args.staging_dir})
+        finally:
+            try:
+                log("Browser closing in 15 seconds...")
+                page.wait_for_timeout(15000)
+                context.close()
+            except Exception:
+                pass  # context may already be closed by an early-exit path
 
 
 if __name__ == "__main__":

@@ -1,19 +1,41 @@
 # 小宇宙 Podcaster Dashboard Selectors
 # Updated: 2026-04-15
+# Source: actual UI testing — the dashboard is a two-panel editor:
+#   Left: title input + rich text show notes (ProseMirror/contenteditable)
+#   Right: audio upload (+), publish mode, cover upload
+#   Bottom: agreement checkbox + "创建" button
 #
-# These selectors are best-effort. The dashboard is a closed SPA that can
-# change without notice. When selectors fail, the upload script captures a
-# screenshot and returns an error JSON so assets can be uploaded manually.
+# Audio and cover uploads use click-to-open file pickers, NOT direct <input> elements.
+# Use Playwright's expect_file_chooser() to intercept the native file dialog.
 
-new_episode_button: "button:has-text('新建单集')"
-audio_upload_input: "input[type='file'][accept*='audio']"
-audio_processing_indicator: ".upload-progress, .processing-indicator"
-title_input: "input[name='title'], input[placeholder*='标题']"
-description_input: "textarea[name='description'], textarea[placeholder*='简介']"
-cover_upload_input: "input[type='file'][accept*='image']"
-draft_button: "button:has-text('存草稿'), button:has-text('保存')"
-publish_button: "button:has-text('发布')"
-success_indicator: ".episode-detail, .success-toast"
+# Episodes list page
+new_episode_button: "text=/创建单集/"
+
+# Create episode page — right panel (audio)
+audio_upload_text: "text=/点击上传音频/"
+# Use expect_file_chooser() after clicking audio_upload_text
+
+# Create episode page — left panel (metadata)
+title_input: "input[placeholder*='标题']"
+description_editor:
+  # Show notes uses a rich-text editor. Try selectors in order:
+  - "[contenteditable='true']"
+  - ".ProseMirror"
+  - "textarea"
+
+# Create episode page — right panel (cover)
+cover_upload_text: "text=/点击上传封面/"
+# Use expect_file_chooser() after clicking cover_upload_text
+cover_crop_confirm: "text=/^裁剪$/"     # NOT "确定" — the crop dialog button says "裁剪"
+
+# Publish options
+publish_now: "text=立即发布"
+publish_scheduled: "text=定时发布"
+
+# Agreement + submit
+agreement_text: "text=阅读并同意"       # Click to the left of this text to hit the checkbox
+create_button: "text=/^创建$/"          # Use .last to avoid matching "创建单集" header
+
 login_detection:
   dashboard_url_pattern: "podcaster.xiaoyuzhoufm.com"
   login_url_pattern: "xiaoyuzhoufm.com/login"
