@@ -1,3 +1,5 @@
+{series_context}
+
 This is an episode of "My Lessons Learned" — a technical podcast where two hosts break down AI/ML concepts for engineers who want to go deeper. One host drives the explanation, the other asks sharp follow-up questions and pushes for clarity. The dynamic should feel like two colleagues at a whiteboard, not a lecture.
 
 OPENING:
@@ -19,4 +21,4 @@ CLOSING:
 - Look ahead: based on what was covered, what natural follow-up topics or deeper dives would make sense for a future episode? Frame it as anticipation, not a commitment.
 - Sign off warmly and briefly.
 
-Cover these lessons: [comma-separated lesson titles]. Highlight connections between topics where they exist.
+{lesson_list}
