@@ -1,22 +1,45 @@
 ---
 user-invocable: true
-allowed-tools: Read, Write, Edit, Glob, Grep, Bash, Skill
-description: "Use when archiving or saving the current session's Q&A into lesson files, or when user says 'archive', 'session wrap-up', 'save lessons', 'archive and exit', or 'archive this session'. Triggers on any request to save conversation knowledge to the MLL lessons repository."
+allowed-tools: Read, Write, Edit, Glob, Grep, Bash, Skill, Agent
+description: "Use when archiving or saving the current session's Q&A into lesson files, or when user says 'archive', 'session wrap-up', 'save lessons', 'archive and exit', or 'archive this session'. Also use when archiving a previous/historical session from a transcript file (e.g., 'archive this transcript', 'kb-arc /path/to/file.jsonl'). Triggers on any request to save conversation knowledge to the MLL lessons repository."
 ---
 
 # Archive Skill -- Session Q&A to Lessons
 
-Archive substantive Q&A from the current conversation into `~/Documents/MLL/lessons/`. Merges new knowledge into existing lesson files or creates new ones, updates the README index, and pushes to the remote git repository.
+Archive substantive Q&A from the current conversation (or a historical transcript file) into `~/Documents/MLL/lessons/`. Merges new knowledge into existing lesson files or creates new ones, updates the README index, and pushes to the remote git repository.
 
-**Invocation:** `/kb-arc` (no arguments)
+**Invocation:** `/kb-arc [source]`
+
+- No argument: scans the current conversation (default behavior)
+- With file path: reads a historical Claude Code transcript (`.jsonl` format)
 
 **Executor:** Opus single-pass. No subagents.
 
 ## Workflow
 
+### Step 0: Resolve Source
+
+Determine where to read Q&A content from:
+
+**If a file path argument is provided** (historical transcript mode):
+
+1. Verify the file exists and has a `.jsonl` extension. If not, report error and STOP.
+2. The file is a Claude Code session transcript in JSONL format. Each line is a JSON object.
+3. **Parse the transcript using a subagent.** The file is typically large (500KB-1MB+), so delegate extraction to an Agent:
+   - Launch an Agent with the prompt: read the JSONL file in chunks (10-15 lines at a time using offset/limit) and extract all substantive teaching exchanges
+   - **Extract user messages:** Look for lines with `"type":"user"` that contain actual user text in `message.content` (string or array with text blocks). Skip lines where `message.content` is a `tool_result` array (these are tool outputs, not user questions).
+   - **Extract assistant explanations:** Look for lines with `"type":"assistant"` that contain `"type":"text"` content blocks in `message.content`. Extract the text values.
+   - **Skip non-teaching content:** Ignore session setup (permission-mode, hook_success, deferred_tools_delta, skill_listing, mcp_instructions_delta), tool_use blocks, file-history-snapshot lines, and last-prompt lines.
+   - The agent should return: a structured summary of all Q&A exchanges, grouped by conversational flow.
+4. Use the extracted Q&A as the input for Step 2 (skip Step 1 since we already have the content).
+
+**If no argument is provided** (current session mode):
+
+Proceed to Step 1 as before — scan the current conversation.
+
 ### Step 1: Scan Conversation
 
-Review all messages in the current session. Classify each exchange:
+Review all messages in the current session (skip this step if using historical transcript mode — content was already extracted in Step 0). Classify each exchange:
 
 **Include:**
 - Technical Q&A and explanations
@@ -162,3 +185,8 @@ Report to the user:
 - **Rebase conflicts:** Report the conflict and leave the repo for manual resolution.
 - **Lessons directory missing:** Run `mkdir -p ~/Documents/MLL/lessons` before proceeding.
 - **README.md missing or has no topics table:** Create the table with the standard structure.
+- **Transcript file not found:** Report "File not found: <path>" and STOP.
+- **Transcript file not .jsonl:** Report "Expected a .jsonl transcript file, got: <extension>" and STOP.
+- **Transcript too large for single read:** This is expected — use the Agent-based chunked reading in Step 0. Never attempt to read the entire file at once.
+- **Transcript contains no teaching content:** After extraction, if the agent reports no substantive Q&A, report "No teaching content found in transcript" and STOP.
+- **Transcript from compacted session:** Compacted sessions may have truncated early messages. Archive whatever teaching content is present; note in confirmation that the session may be incomplete.

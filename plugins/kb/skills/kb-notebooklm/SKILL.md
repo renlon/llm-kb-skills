@@ -423,36 +423,41 @@ Each workflow follows a common pattern: select source files from the KB, filter 
 
 4. **Sort:** Sort by mtime ascending (oldest first).
 
-5. **Topic grouping (when lesson count > 10):** If the selected lessons span multiple unrelated topic areas, group them into focused episodes rather than one long unfocused podcast. This produces better teaching flow and shorter, more digestible episodes.
+5. **Topic grouping — one main topic per episode:** Each episode MUST focus on one coherent main topic. Group lessons so that every lesson in an episode is directly related to the same theme. This produces focused, deep teaching episodes rather than shallow multi-topic surveys.
 
    **Grouping algorithm:**
    - Read the title and first 10 lines of each lesson to understand its topic
-   - Cluster lessons by semantic similarity (e.g., "quantization + model formats + inference frameworks" form one cluster, "attention + transformers + KV cache" form another)
-   - Each group should have 5-10 lessons and a coherent theme
+   - Cluster lessons by semantic similarity into **tight, single-topic groups**. Each group should center on one main concept or theme:
+     - ✅ Good: "KV Cache and Attention Optimization" (all lessons about attention/KV cache)
+     - ✅ Good: "Model Quantization and Deployment" (quantization + formats + inference frameworks — tightly related)
+     - ❌ Bad: "ML Fundamentals" (too broad — mixing attention, quantization, and GPU programming)
+     - ❌ Bad: "Recent Lessons" (no thematic coherence)
+   - Each group should have 3-10 lessons with a clear, nameable theme
    - Exclude lessons that are clearly not ML/AI teaching content (internal tools, operational logs, non-technical topics) — report skipped lessons to the user
-   - If 10 or fewer lessons remain and they share a coherent theme, keep as a single episode
+   - If ALL remaining lessons share a coherent single theme, keep as one episode regardless of count
+
+   **Source material presentation:** When providing sources to NotebookLM for a single episode, the lessons should be ordered to create a natural learning progression within the topic (foundational → intermediate → advanced). This ordering influences the podcast narrative flow.
 
    Present the proposed grouping to the user:
    ```
-   I'd split these N lessons into M episodes:
+   I'd create M focused episodes from these N lessons:
    
-   Episode 1: "Theme Name" (X lessons)
-   - Lesson A
-   - Lesson B
+   Episode 1: "Main Topic Name" (X lessons)
+   - Lesson A (foundational)
+   - Lesson B (builds on A)
    ...
    
-   Episode 2: "Theme Name" (Y lessons)
-   - Lesson C
+   Episode 2: "Main Topic Name" (Y lessons)
+   - Lesson C (foundational)
    ...
    
    Skipped (not ML/AI teaching content):
-   - Lesson Z
+   - Lesson Z (reason)
    
+   Each episode focuses on ONE main topic for deeper coverage.
    Proceed with all M episodes in parallel?
    ```
-   Wait for user confirmation. User may adjust grouping, remove episodes, or request a single episode.
-
-   If 10 or fewer lessons, skip grouping — proceed as a single episode.
+   Wait for user confirmation. User may adjust grouping, move lessons between episodes, or merge episodes.
 
 5b. **Published topic cross-check:** If episode registry is available (see Episode Continuity section), run the cross-check against published episodes. Present overlap findings to the user and wait for confirmation before proceeding to generation.
 
@@ -486,12 +491,14 @@ Each workflow follows a common pattern: select source files from the KB, filter 
     episodes, replace `{series_context}` with an empty string.
 
     **Lesson list injection:** Replace the `{lesson_list}` placeholder with:
-    "Cover these lessons: [comma-separated lesson titles]. Highlight connections
-    between topics where they exist."
+    "This episode's main topic: [episode theme name]. Cover these lessons as
+    different facets of this single topic: [comma-separated lesson titles].
+    Weave them into a unified narrative — build from foundational to advanced
+    within this theme. Show how each lesson connects to and deepens the others."
 
     If the prompt file cannot be found, use this fallback:
     ```
-    Cover the key concepts from these lessons: [comma-separated lesson titles]. Make it engaging and educational. Highlight connections between topics where they exist. Target audience: someone learning ML/AI concepts.
+    This episode's main topic: [episode theme name]. Cover these lessons as different facets of this single topic: [comma-separated lesson titles]. Weave them into a unified narrative that builds from foundational to advanced. Make it engaging and educational. Target audience: someone learning ML/AI concepts.
     ```
 
 6j. **Get artifact ID and persist run record:** Run `source <venv> && notebooklm artifact list --notebook <notebook_id> --json`, extract artifact ID. Write run entry to `state.runs` with artifact `status: pending`.
