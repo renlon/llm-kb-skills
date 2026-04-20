@@ -96,6 +96,17 @@ Questions in a live session often rely on implicit context — earlier turns, sh
 
 Apply the same rule to answers only where needed to remove dangling references ("as I said above", "that file we looked at") — otherwise preserve the answer as given.
 
+**Preserve visual artifacts verbatim in the Q&A transcript:**
+
+When Claude's original answer contained any of the following, copy them into the lesson's Q&A Transcript section **as-is**, inside the corresponding answer block. Do not paraphrase them into prose:
+
+- Markdown tables — keep the full table with all rows, columns, and alignment. A table was worth drawing in the live session, so it is worth preserving.
+- ASCII / Unicode box-drawing diagrams (e.g., boxes made of `─│┌┐└┘`, arrows like `──→`, tree sketches with `├──`).
+- Mermaid, PlantUML, or other text-based diagram fences.
+- Code blocks, CLI transcripts, and formatted output.
+
+These artifacts are also signals for Step 6 (see "Recreate visual artifacts from the session" there) — they should be captured in the transcript **and** re-rendered as Excalidraw diagrams.
+
 #### 5a: Existing Lesson Found -- Merge
 
 1. Read the existing lesson file fully
@@ -123,9 +134,20 @@ Create a new file at `~/Documents/MLL/lessons/Topic_Name_YYYY-MM-DD.md` using to
 
 **Only skip when ALL of the following are true:**
 - The lesson is under 100 words of technical content AND
-- The content is a single isolated definition with no relationships to visualize
+- The content is a single isolated definition with no relationships to visualize AND
+- The original session contained no visual artifacts (no tables, no ASCII/Mermaid diagrams) for this topic
 
-**Diagram approach by content type:**
+**Recreate visual artifacts from the session (highest priority):**
+
+Before picking a generic diagram type, scan the session's answers for visuals Claude already drew to explain the topic:
+
+- **ASCII / Unicode diagrams, Mermaid blocks, tree sketches, flow sketches** — these are literal diagrams the user already saw and found explanatory. Reproduce each one as an Excalidraw diagram that preserves the same structure (same nodes, same edges, same direction of flow, same grouping). This takes precedence over the generic "diagram type by content" heuristic below.
+- **Markdown tables** — a table is a visual artifact too. If the table expresses a comparison, tradeoff matrix, or taxonomy that benefits from a graphical view, generate a `comparison` or `hierarchy` Excalidraw diagram that encodes the same relationships. Keep the raw markdown table in the Q&A Transcript as well (per Step 5) — Excalidraw complements, not replaces, the table.
+- **Multiple visuals in one lesson** — if a single lesson has more than one distinct visual (e.g., an ASCII diagram AND a comparison table), generate multiple Excalidraw files (`<lesson-slug>-1.excalidraw`, `<lesson-slug>-2.excalidraw`, etc.) and embed each one at the most relevant location in the lesson body.
+
+When passing the context to `kb-excalidraw`, include the original ASCII/Mermaid block or table in the `context` field so the engine can mirror its structure.
+
+**Fallback — diagram approach by content type** (only when no session visual exists for the topic):
 - Workflow/pipeline/process → `workflow` diagram showing the steps and flow
 - Architecture/system with components → `architecture` diagram showing relationships
 - Data transformations or I/O chains → `data_flow` diagram

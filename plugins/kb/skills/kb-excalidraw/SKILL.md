@@ -55,7 +55,23 @@ For comprehensive diagrams, plan sections before writing any JSON. Each section 
 
 ### Step 3: Map Concept to Visual Pattern
 
-Select a visual pattern based on `diagram_type`. The type hint from the caller is a starting point, but **content-driven choice overrides the type hint** if the context clearly suggests a different pattern.
+**First: check if the context contains a source visual to mirror.**
+
+Before selecting a generic pattern, scan the `context` field for any of these artifacts:
+
+- **ASCII / Unicode diagrams** (boxes built from `─│┌┐└┘`, arrows like `──→`, tree sketches with `├──`, flow sketches)
+- **Mermaid / PlantUML / DOT fenced blocks**
+- **Markdown tables that encode a comparison, taxonomy, or matrix**
+
+If any are present, the Excalidraw diagram must **faithfully mirror that source visual** — same nodes, same labels, same edges, same direction of flow, same grouping and ordering. Preserve the author's structural intent; do not reinterpret it into a different pattern. In this case the `diagram_type` hint is secondary — the source visual wins.
+
+- ASCII box/arrow diagram → translate each box into a shape and each arrow into an Excalidraw arrow with the same source/target.
+- Mermaid flowchart → mirror the graph, respecting `TD`/`LR` direction.
+- Mermaid sequence diagram → render as a vertical swimlane with arrows between lifelines.
+- Markdown comparison table → render as a Side-by-Side comparison pattern where each column becomes a parallel stack and each row becomes a horizontally-aligned property.
+- Markdown hierarchy/taxonomy table → render as a Tree pattern.
+
+**Otherwise: pick a visual pattern based on `diagram_type`.** The type hint from the caller is a starting point, but **content-driven choice overrides the type hint** if the context clearly suggests a different pattern.
 
 | `diagram_type` | Default Pattern | Visual Structure |
 |-----------------|----------------|------------------|
