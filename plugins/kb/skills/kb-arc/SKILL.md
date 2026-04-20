@@ -85,12 +85,23 @@ For each grouped topic from Step 2:
 
 ### Step 5: Write Lessons
 
+**Question clarity rule (applies to all Q&A written in this step):**
+
+Questions in a live session often rely on implicit context — earlier turns, shared screen state, a file being read, a concept just defined, or pronouns like "it"/"that"/"this one". A future reader opening the lesson file will not have that context. When transcribing each question into the lesson:
+
+- Rewrite the question so it stands alone. Expand pronouns, name the subject explicitly, and inline any assumed background (e.g., "Given we're discussing KV cache..." or "In the context of X, ...").
+- Preserve the user's original intent and tone. Do not invent questions the user did not ask, and do not editorialize.
+- If a question only makes sense as a follow-up to a prior exchange in the same lesson, keep it tight and rely on the preceding Q&A within the same Round to supply context. If it spans Rounds or topics, make it self-contained.
+- If the original phrasing is already clear and self-contained, use it verbatim.
+
+Apply the same rule to answers only where needed to remove dangling references ("as I said above", "that file we looked at") — otherwise preserve the answer as given.
+
 #### 5a: Existing Lesson Found -- Merge
 
 1. Read the existing lesson file fully
 2. Identify what is genuinely new in the conversation that is not already covered
 3. **Technical Summary section:** Rewrite and integrate new knowledge into the existing summary. Do not just append paragraphs -- merge cleanly so the summary reads as a unified document with no redundancy.
-4. **Q&A Transcript section:** Append only new Q&A exchanges. Skip exchanges that cover ground already present in the file.
+4. **Q&A Transcript section:** Append only new Q&A exchanges, applying the question clarity rule above. Skip exchanges that cover ground already present in the file.
 5. Rename the file to update the date suffix to today's date using `git mv`. If the existing file has no date suffix, skip the rename and write in place.
 
 Example (substitute actual filename and today's date):
