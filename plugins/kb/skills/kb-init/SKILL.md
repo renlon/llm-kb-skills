@@ -198,6 +198,116 @@ integrations:
 - `venv_path`: absolute path to the venv directory (used for `source <venv_path>/bin/activate` in all CLI commands)
 - `lessons_path`, `wiki_path`, `output_path`: resolved from vault path and external sources
 
+#### 5e. Podcast Post-Processing Setup (new)
+
+If the user enabled NotebookLM (step 5a-5d above), also set up the prerequisites for intro music assembly and transcript generation.
+
+**A. Install additional venv dependencies** (both for fresh setup and for existing venvs that predate this feature):
+
+```bash
+source <NOTEBOOKLM_VENV>/bin/activate && \
+  pip install -q 'faster-whisper>=1.0.0' 'pyannote.audio>=3.1.0' 'PyYAML>=6.0'
+```
+
+Verify the imports land:
+
+```bash
+source <NOTEBOOKLM_VENV>/bin/activate && \
+  python3 -c "import faster_whisper, pyannote.audio, yaml; print('OK')"
+```
+
+If the verify step fails, report the stderr to the user, point at `plugins/kb/skills/kb-notebooklm/scripts/requirements.txt`, and STOP.
+
+**B. Verify ffmpeg + ffprobe are on PATH:**
+
+```bash
+command -v ffmpeg >/dev/null && command -v ffprobe >/dev/null && echo "ffmpeg OK" || echo "ffmpeg MISSING"
+```
+
+If missing, guide the user:
+
+> 封面与 intro music 功能需要 ffmpeg。请运行:
+> ```
+> brew install ffmpeg
+> ```
+> 完成后重新运行 `/kb-init`。
+
+Record `ffmpeg_available = <bool>`. If unavailable, the skill will proceed but write `intro_music: null` into `kb.yaml` so assembly silently skips per-episode.
+
+**C. HuggingFace token + pyannote license acceptance (for transcripts):**
+
+Check if `HUGGINGFACE_TOKEN` is already set:
+
+```bash
+test -n "$HUGGINGFACE_TOKEN" && echo "Token present" || echo "Token missing"
+```
+
+If missing, ask the user:
+
+> 是否要启用podcast 字幕/转录功能（需要 HuggingFace 帐号 + 接受两个 pyannote 模型协议）？
+> - 启用后可生成 WebVTT 字幕 + markdown 逐字稿
+> - 不启用也能用 podcast 功能，仅跳过转录
+
+- **启用 (yes):**
+  1. 在浏览器打开 https://huggingface.co/pyannote/segmentation-3.0 并点击 "Agree and access repository"
+  2. 在浏览器打开 https://huggingface.co/pyannote/speaker-diarization-3.1 并点击 "Agree and access repository"
+  3. 在 https://huggingface.co/settings/tokens 创建一个 read-scope token
+  4. 将以下内容加入你的 shell profile (~/.zshrc 或 ~/.bashrc):
+     ```
+     export HUGGINGFACE_TOKEN=hf_...
+     ```
+  5. 运行 `source ~/.zshrc` 或重启终端
+  6. 完成后按 Enter 继续
+
+  Verify:
+  ```bash
+  test -n "$HUGGINGFACE_TOKEN" && echo "Token set" || echo "Token still missing"
+  ```
+  If still missing, warn the user and fall back to `transcript_enabled = false`.
+
+- **跳过 (no):** Set `transcript_enabled = false`.
+
+If the token IS set, attempt a dry-run model download to verify license acceptance:
+
+```bash
+source <NOTEBOOKLM_VENV>/bin/activate && \
+  python3 -c "
+from pyannote.audio import Pipeline
+import os
+try:
+    Pipeline.from_pretrained('pyannote/speaker-diarization-3.1', use_auth_token=os.environ['HUGGINGFACE_TOKEN'])
+    print('License check: OK')
+except Exception as e:
+    print(f'License check FAILED: {e}')
+    raise SystemExit(1)
+"
+```
+
+If this fails, warn the user that one or both licenses haven't been accepted. Point them back to the two URLs and fall back to `transcript_enabled = false`.
+
+**D. Persist the outcome to `kb.yaml`:**
+
+Non-destructive merge into `kb.yaml`. Under `integrations.notebooklm.podcast` (create if missing):
+
+```yaml
+integrations:
+  notebooklm:
+    podcast:
+      transcript:
+        enabled: <transcript_enabled>       # explicit: true or false based on token/license outcome
+        model: "large-v3"
+        device: "auto"
+        language: "zh"
+      hosts: ["瓜瓜龙", "海发菜"]
+      extra_host_names: []
+      intro_music_length_seconds: 12
+      intro_crossfade_seconds: 3
+      # intro_music: <omit this line if ffmpeg is unavailable; else leave commented
+      #              as a hint for the user to set a path later>
+```
+
+**E. Note on model caching:** `faster-whisper` uses the standard HuggingFace cache at `~/.cache/huggingface/hub/`. If the user has VoxToriApp installed on the same machine, the `large-v3` model is likely already cached at `~/.cache/huggingface/hub/models--Systran--faster-whisper-large-v3` and will be reused automatically. Do NOT override `HF_HOME` in this skill.
+
 ### 6. Maintenance Cadence
 
 Inform about options:
