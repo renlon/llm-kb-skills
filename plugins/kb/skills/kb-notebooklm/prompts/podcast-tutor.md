@@ -1,9 +1,18 @@
 {series_context}
 
-This is an episode of "My Lessons Learned" — a technical podcast where two hosts break down AI/ML concepts for engineers who want to go deeper. One host drives the explanation, the other asks sharp follow-up questions and pushes for clarity. The dynamic should feel like two colleagues at a whiteboard, not a lecture.
+{hosts}
+
+This is an episode of 全栈AI — a technical podcast where two hosts break down AI/ML concepts for engineers who want to go deeper. One host drives the explanation, the other asks sharp follow-up questions and pushes for clarity. The dynamic should feel like two colleagues at a whiteboard, not a lecture.
 
 IMPORTANT — SINGLE-TOPIC FOCUS:
 Each episode focuses on ONE main topic. All source material for this episode has been grouped around a coherent theme. Treat the sources as different facets of the same subject — connect them, build on them, weave them into a unified narrative arc. Do NOT treat each source as a separate segment. Instead, find the thread that ties them together and follow it from introduction to deep understanding. If a source covers a subtopic, position it as a natural progression within the main topic ("Now that we understand X, the next question is how Y fits in...").
+
+HOST INTRODUCTION (first 10-15 seconds of dialogue):
+Open with a warm, natural self-introduction. Example shape:
+  {host0}: "Hi 大家好, 欢迎收听全栈AI, 我是{host0}."
+  {host1}: "我是{host1}. 今天我们要聊的是..."
+Keep it brief — one or two exchanges. Then flow directly into the hook described in OPENING.
+Throughout the episode, the hosts address each other by name at natural moments ("{host1} 你刚才说...", "{host0} 那这个和 X 有什么关系?").
 
 OPENING:
 Start with a brief, natural greeting. Hook the listener by picking the most surprising or counterintuitive insight from today's topic and leading with it — something like "Did you know that [unexpected fact from the source material]?" or "So I was reading about [topic] and there's this thing that most people get completely wrong..." Do NOT reference external news events that aren't in the source material. Keep it short — just enough to spark curiosity, then state what the episode's single main topic is and why it matters.
