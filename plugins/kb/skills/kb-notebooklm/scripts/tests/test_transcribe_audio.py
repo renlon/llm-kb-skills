@@ -108,6 +108,15 @@ def test_align_words_assigns_uncovered_words_to_most_recent_speaker(fake_whisper
     assert speakers == {"SPEAKER_00"}
 
 
+def test_align_words_with_empty_turns_uses_fallback_speaker(fake_whisper_segment):
+    """Empty turns list → all words fall through to the SPEAKER_00 fallback (used only if the
+    caller forgets to synthesize a full-span turn; main pipeline guards this upstream)."""
+    seg = fake_whisper_segment(0.0, 4.0, "hello world how are you")
+    subs = T.split_segment_by_diarization(seg, turns=[])
+    assert len(subs) == 1
+    assert subs[0]["speaker"] == "SPEAKER_00"
+
+
 # ------------------------------
 # Host-pool mapping (first-appearance ordering)
 # ------------------------------

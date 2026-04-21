@@ -498,12 +498,12 @@ Each workflow follows a common pattern: select source files from the KB, filter 
       1. If `intro_music` is set and the file exists: run `ffprobe` to get duration, then compute `effective_intro_length = min(requested_intro_length, duration)` and `effective_crossfade = min(requested_crossfade, effective_intro_length - 0.5)`. Also compute `intro_music_size`, `intro_music_mtime`, and `intro_music_content_sha256` (SHA-256 of file bytes — use `scripts/postproc_hashing.py:hash_intro_file()`). Set `intro_music_configured = true`.
       2. If `intro_music` is unset, null, or missing on disk: set all intro-related values to empty/zero, `intro_music_configured = false`.
       3. `transcript_enabled = bool(integrations.notebooklm.podcast.transcript.enabled)` (treats absent as false).
-      4. `desired_vtt_offset = effective_intro_length - effective_crossfade` (or 0 when intro not configured).
+      (Note: `actual_vtt_offset` — the value that actually travels with the VTT — is NOT computed here. It comes from the assembly script's `final_offset_seconds` in step 6k, which is `0.0` when assembly is skipped or fails.)
 
 6b. **Compute `sources_hash`:** Existing logic (file paths + mtimes).
 
 6b'. **Compute `params_hash` and `postproc_hash` (REVISED):**
-      Shell out to `python3 <skill_dir>/scripts/postproc_hashing.py`:
+      Shell out via `python3 -c` (the module is imported, not executed as a script):
       ```
       python3 -c "
       import sys, json
@@ -683,8 +683,9 @@ Each workflow follows a common pattern: select source files from the KB, filter 
           vtt: <output_path>/<stem>.vtt             # null if transcript disabled/failed
           transcript_md: <output_path>/<stem>.transcript.md    # null if transcript disabled/failed
           manifest: <output_path>/<stem>.mp3.manifest.yaml
-          intro_applied: <bool from background-agent JSON>
-          transcript_applied: <bool from background-agent JSON>
+          intro_applied: <bool from background-agent JSON; top-level `intro_applied`>
+          transcript_applied: <bool from background-agent JSON; nested `transcript.applied`>
+          vtt_offset_seconds: <float from background-agent JSON `vtt_offset_used`>
         ```
       - Keep `artifacts[0].output_files = [final_audio]` for backward compatibility.
     - **Write sidecar manifest:** Write `<output_path>/<stem>.mp3.manifest.yaml` alongside the generated

@@ -125,6 +125,27 @@ def test_postproc_hash_handles_none_intro_deterministically():
     assert H.postproc_hash(**p1) == H.postproc_hash(**p2)
 
 
+def test_postproc_hash_changes_when_host_pool_changes():
+    h1 = H.postproc_hash(**_base_postproc("/x.mp3"))
+    p2 = _base_postproc("/x.mp3")
+    p2["host_pool"] = ["瓜瓜龙", "玉米糖"]
+    assert H.postproc_hash(**p2) != h1
+
+
+def test_postproc_hash_changes_when_transcript_model_changes():
+    h1 = H.postproc_hash(**_base_postproc("/x.mp3"))
+    p2 = _base_postproc("/x.mp3")
+    p2["transcript_model"] = "medium"
+    assert H.postproc_hash(**p2) != h1
+
+
+def test_postproc_hash_changes_when_transcript_language_changes():
+    h1 = H.postproc_hash(**_base_postproc("/x.mp3"))
+    p2 = _base_postproc("/x.mp3")
+    p2["transcript_language"] = "en"
+    assert H.postproc_hash(**p2) != h1
+
+
 # ------------------------------
 # postproc_complete predicate
 # ------------------------------

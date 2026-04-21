@@ -53,6 +53,17 @@ def test_preflight_skips_when_intro_below_floor():
     assert any("too short" in w.lower() or "skip" in w.lower() for w in res.warnings)
 
 
+def test_preflight_at_exact_floor_is_accepted():
+    # 1.5s file is exactly at the floor — accepted (strict <).
+    res = A.preflight(intro_duration=1.5, requested_intro_length=12.0, requested_crossfade=3.0)
+    assert res.assembly_possible is True
+
+
+def test_preflight_just_below_floor_is_rejected():
+    res = A.preflight(intro_duration=1.49, requested_intro_length=12.0, requested_crossfade=3.0)
+    assert res.assembly_possible is False
+
+
 def test_preflight_exact_requested_matches_file():
     # 3s file, request 3s + 2s → effective 3s + 2s (crossfade constraint: 2 < 2.5)
     res = A.preflight(intro_duration=3.0, requested_intro_length=3.0, requested_crossfade=2.0)
