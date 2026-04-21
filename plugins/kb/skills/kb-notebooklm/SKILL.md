@@ -34,6 +34,15 @@ This skill operates in two layers:
 1. **Read configuration:**
    Read `kb.yaml`. Check for `integrations.notebooklm` section. If missing or `enabled: false`, report: "NotebookLM integration not enabled in kb.yaml." and STOP.
 
+   For podcast workflows, also read `integrations.notebooklm.podcast` — new keys supported:
+   - `intro_music`: path to the intro music file (null/missing → no intro music).
+   - `intro_music_length_seconds` (default 12)
+   - `intro_crossfade_seconds` (default 3)
+   - `hosts` (default `["瓜瓜龙", "海发菜"]`)
+   - `extra_host_names` (default `[]`)
+   - `transcript.enabled` (default `false` when absent — set explicitly by `kb-init`)
+   - `transcript.model` (default `large-v3`), `transcript.device` (default `auto`), `transcript.language` (default `zh`)
+
 2. **Resolve CLI and venv path:**
    Read `config.venv_path` (or fall back to `config.cli_path` parent directory) from `integrations.notebooklm`. This is the absolute path to the dedicated Python venv.
    ```bash
@@ -465,9 +474,83 @@ Each workflow follows a common pattern: select source files from the KB, filter 
 
 6a. **Limit:** Truncate to `config.max_sources_per_notebook` (default 45) per episode.
 
-6b. **Compute hashes:** Calculate `sources_hash` (from file paths and mtimes) and `params_hash` (from format, length, language, instruction template).
+6a'. **Resolve host pool and render prompt (NEW):**
+     1. Read `integrations.notebooklm.podcast.hosts` from kb.yaml. Default `["瓜瓜龙", "海发菜"]` if missing.
+     2. Read `integrations.notebooklm.podcast.extra_host_names`. Default `[]`.
+     3. Build `host_pool = hosts + extra_host_names`. Validate len >= 2; if not, abort with clear error.
+     4. Read `prompts/podcast-tutor.md`.
+     5. Substitute `{series_context}` (compile from published episodes registry — existing logic).
+     6. Substitute `{hosts}` with the rendered HOSTS block (see below).
+     7. Substitute `{host0}` with `host_pool[0]` and `{host1}` with `host_pool[1]` throughout the template.
+     8. Substitute `{lesson_list}` with the episode's lesson list — existing logic.
+     9. Store the final string as `rendered_prompt`. This is the exact string that will be sent to `notebooklm generate audio` in step 6i.
 
-6c. **Dedup check:** Search `state.runs` for matching `workflow + sources_hash + params_hash`. If match found, follow deduplication algorithm (session recovery, skip, re-download, or partial retry). Otherwise continue.
+     **`{hosts}` block template:**
+     ```
+     HOSTS:
+     This episode has two hosts: {host0} and {host1}.
+     They address each other and refer to themselves by these names throughout the episode.
+     {host0} typically drives explanations; {host1} asks the sharp follow-up questions. Either host may take either role — keep it natural, not rigid.
+     ```
+     (with `{host0}` / `{host1}` substituted after this block is inserted.)
+
+6a''. **Resolve post-processing config (NEW):**
+      1. If `intro_music` is set and the file exists: run `ffprobe` to get duration, then compute `effective_intro_length = min(requested_intro_length, duration)` and `effective_crossfade = min(requested_crossfade, effective_intro_length - 0.5)`. Also compute `intro_music_size`, `intro_music_mtime`, and `intro_music_content_sha256` (SHA-256 of file bytes — use `scripts/postproc_hashing.py:hash_intro_file()`). Set `intro_music_configured = true`.
+      2. If `intro_music` is unset, null, or missing on disk: set all intro-related values to empty/zero, `intro_music_configured = false`.
+      3. `transcript_enabled = bool(integrations.notebooklm.podcast.transcript.enabled)` (treats absent as false).
+      (Note: `actual_vtt_offset` — the value that actually travels with the VTT — is NOT computed here. It comes from the assembly script's `final_offset_seconds` in step 6k, which is `0.0` when assembly is skipped or fails.)
+
+6b. **Compute `sources_hash`:** Existing logic (file paths + mtimes).
+
+6b'. **Compute `params_hash` and `postproc_hash` (REVISED):**
+      Shell out via `python3 -c` (the module is imported, not executed as a script):
+      ```
+      python3 -c "
+      import sys, json
+      sys.path.insert(0, '<skill_dir>/scripts')
+      import postproc_hashing as H
+      print(json.dumps({
+          'params': H.params_hash(
+              format=<format>, length=<length>, language=<language>,
+              rendered_prompt=<rendered_prompt>, host_pool=<host_pool>[:2],
+          ),
+          'postproc': H.postproc_hash(
+              intro_music_path=<intro_music>, intro_music_mtime=<mtime>,
+              intro_music_size=<size>, intro_music_content_sha256=<sha256>,
+              requested_intro_length=<requested_intro_length>,
+              requested_crossfade_seconds=<requested_crossfade>,
+              effective_intro_length=<effective_intro_length>,
+              effective_crossfade=<effective_crossfade>,
+              transcript_enabled=<transcript_enabled>,
+              transcript_model=<transcript.model>,
+              transcript_language=<transcript.language>,
+              host_pool=<host_pool>,
+          ),
+      }))
+      "
+      ```
+      Use argv / stdin JSON to avoid shell-quoting the rendered_prompt. (Example: pipe a JSON blob into a python -c that reads stdin.)
+
+6c. **Dedup check (REVISED):**
+    1. Search `state.runs` for matching `workflow + sources_hash + params_hash`.
+    2. If match found with all artifacts `completed`:
+       - Read `podcast_outputs` from the matched run (or infer `final_audio = artifacts[0].output_files[0]` for pre-migration records, with raw assumed absent).
+       - Call the `postproc_complete` helper:
+         ```
+         python3 -c "
+         import sys
+         sys.path.insert(0, '<skill_dir>/scripts')
+         import postproc_hashing as H
+         outputs = {...}  # from run record
+         print(H.postproc_complete(outputs, intro_music_configured=<bool>, transcript_enabled=<bool>))
+         "
+         ```
+       - If stored `postproc_hash` matches current AND `postproc_complete` returns True: **skip entirely**. Report skipped episode.
+       - Else if stored raw_audio file exists on disk: **re-run post-processing only** (jump to step 6k with `skip_generation=true`). Log "Reusing retained raw audio; re-running post-processing."
+       - Else: **fall back to full regeneration**. Log "Raw audio missing — regenerating from NotebookLM."
+    3. If any artifact `pending`: session recovery (existing).
+    4. If any artifact `failed`: partial retry (existing).
+    5. No match: proceed to full generation.
 
 6d. **Handle empty selection:** If no files match after filtering, report "No new lessons since last podcast" and STOP.
 
@@ -479,47 +562,110 @@ Each workflow follows a common pattern: select source files from the KB, filter 
 
 6h. **Wait for sources ready:** Poll `source <venv> && notebooklm source list --notebook <notebook_id> --json` every 15 seconds until all sources have `status: ready` (timeout: 600 seconds). If any source reaches `status: error`, mark notebook as `failed` in state, report error details, STOP.
 
-6i. **Generate audio:** Run `source <venv> && notebooklm generate audio "<instructions>" --format <config.podcast.format> --length <config.podcast.length> --language <config.language> --notebook <notebook_id> --json`.
+6i. **Generate audio (REVISED):** The prompt has already been fully rendered in step 6a'.
+    Invoke:
+    ```
+    source <venv> && notebooklm generate audio "<rendered_prompt>" \
+      --format <config.podcast.format> \
+      --length <config.podcast.length> \
+      --language <config.language> \
+      --notebook <notebook_id> \
+      --json
+    ```
+    Use argv (subprocess list form) or stdin to pass the rendered prompt — it contains
+    newlines and CJK text that must survive shell interpolation. If the prompt is
+    particularly long, write it to `<staging_dir>/prompt.txt` and use `--prompt-file`
+    if the CLI supports it, or read via process substitution.
 
-    **Audio instructions template:**
-
-    Read the prompt from `prompts/podcast-tutor.md` relative to this skill's directory.
-
-    **Series bible injection:** If the episode registry exists and contains published
-    episodes, compile the series bible (see "Episode Continuity" section) and replace
-    the `{series_context}` placeholder in the prompt. If no registry or no published
-    episodes, replace `{series_context}` with an empty string.
-
-    **Lesson list injection:** Replace the `{lesson_list}` placeholder with:
-    "This episode's main topic: [episode theme name]. Cover these lessons as
-    different facets of this single topic: [comma-separated lesson titles].
-    Weave them into a unified narrative — build from foundational to advanced
-    within this theme. Show how each lesson connects to and deepens the others."
-
-    If the prompt file cannot be found, use this fallback:
+    If the prompt file cannot be found, use this fallback (same as before):
     ```
     This episode's main topic: [episode theme name]. Cover these lessons as different facets of this single topic: [comma-separated lesson titles]. Weave them into a unified narrative that builds from foundational to advanced. Make it engaging and educational. Target audience: someone learning ML/AI concepts.
     ```
 
 6j. **Get artifact ID and persist run record:** Run `source <venv> && notebooklm artifact list --notebook <notebook_id> --json`, extract artifact ID. Write run entry to `state.runs` with artifact `status: pending`.
 
-6k. **Spawn background agent:** Use Agent tool with `run_in_background: true` to wait and download:
-    ```
-    Wait for artifact <artifact_id> in notebook <notebook_id> to complete, then download.
-    1. Run: source <venv>/bin/activate && notebooklm artifact wait <artifact_id> -n <notebook_id> --timeout 2700
-    2. If exit code 0: Run: source <venv>/bin/activate && notebooklm download audio <output_path>/<filename> -n <notebook_id>
-    3. If exit code 2 (timeout): Report timeout
-    4. If exit code 1 (error): Report error details
-    Report the outcome (success with file path, or failure with reason).
-    ```
+6k. **Spawn background agent (REVISED — assemble, then transcribe with actual offset):**
 
-    **Output filename logic:**
-    - Single episode: `podcast-YYYY-MM-DD.mp3`
-    - Grouped episodes: `podcast-<theme-slug>-YYYY-MM-DD.mp3`
-    - Topic-filtered: `podcast-<topic>-YYYY-MM-DD.mp3`
-    - Saved to `config.output_path`
+    **Output filename stem:**
+    - Single episode: `podcast-YYYY-MM-DD`
+    - Grouped episodes: `podcast-<theme-slug>-YYYY-MM-DD`
+    - Topic-filtered: `podcast-<topic>-YYYY-MM-DD`
+    Let `<stem>` = the chosen filename stem; paths become `<output_path>/<stem>.raw.mp3`, `<output_path>/<stem>.mp3`, `<output_path>/<stem>.vtt`, `<output_path>/<stem>.transcript.md`.
+
+    Use Agent tool with `run_in_background: true`:
+    ```
+    Wait for NotebookLM artifact, then assemble intro music, then transcribe.
+
+    1. source <venv>/bin/activate && notebooklm artifact wait <artifact_id> -n <notebook_id> --timeout 2700
+       If exit != 0: report and stop.
+
+    2. source <venv>/bin/activate && notebooklm download audio <output_path>/<stem>.raw.mp3 -n <notebook_id>
+       If exit != 0: report and stop.
+
+    3. intro_applied = false
+       actual_vtt_offset = 0.0
+       If <intro_music_configured>:
+         Run: python3 <skill_dir>/scripts/assemble_audio.py \
+           --raw-audio <output_path>/<stem>.raw.mp3 \
+           --intro <intro_music> \
+           --output <output_path>/<stem>.mp3 \
+           --intro-length <effective_intro_length> \
+           --crossfade <effective_crossfade> \
+           --json
+         Parse the JSON from stdout.
+         If success AND intro_applied=true:
+           intro_applied = true
+           actual_vtt_offset = <final_offset_seconds from the JSON>
+         Else:
+           cp <output_path>/<stem>.raw.mp3 <output_path>/<stem>.mp3
+           intro_applied = false
+           actual_vtt_offset = 0.0
+       Else:
+         cp <output_path>/<stem>.raw.mp3 <output_path>/<stem>.mp3
+
+    4. transcript_applied = false
+       speaker_count = 0
+       If <transcript_enabled>:
+         Run: python3 <skill_dir>/scripts/transcribe_audio.py \
+           --audio <output_path>/<stem>.raw.mp3 \
+           --hosts '<json-encoded host_pool>' \
+           --output-vtt <output_path>/<stem>.vtt \
+           --output-md <output_path>/<stem>.transcript.md \
+           --vtt-offset-seconds <actual_vtt_offset> \
+           --model <transcript.model> \
+           --device <transcript.device> \
+           --language <transcript.language> \
+           --title "全栈AI — <theme> (YYYY-MM-DD)" \
+           --json
+         Parse the JSON.
+         If success: transcript_applied=true; speaker_count from the JSON.
+         Else: transcript_applied=false (do NOT fail the episode).
+
+    5. Report a JSON summary to stdout:
+        {
+          "raw_audio": "<output_path>/<stem>.raw.mp3",
+          "final_audio": "<output_path>/<stem>.mp3",
+          "intro_applied": <bool>,
+          "vtt_offset_used": <seconds>,
+          "transcript": {
+             "vtt": "<output_path>/<stem>.vtt" | null,
+             "markdown": "<output_path>/<stem>.transcript.md" | null,
+             "applied": <bool>,
+             "speaker_count": <int>
+          },
+          "warnings": [<per-stage warnings>]
+        }
+
+    Shell-quote every path. If a path contains spaces or Chinese characters
+    or other shell-special chars, pass values through argv arrays to
+    subprocess.run — never inline user-controlled strings into a shell string.
+    ```
 
     **Parallel execution:** When multiple episode groups exist, launch all background agents in parallel (one per episode). Each episode gets its own notebook, run record, and artifact.
+
+    **Recovery path (when skip_generation=true from step 6c):** Skip steps 1 and 2;
+    assume the raw audio already exists at `<output_path>/<stem>.raw.mp3`. Execute
+    only steps 3 and 4 (assembly + transcription).
 
 7. **On background agent success (in main conversation after agent reports):**
     - Update artifact in run record: `status: completed`, add `output_files: [<absolute path>]`
@@ -527,13 +673,34 @@ Each workflow follows a common pattern: select source files from the KB, filter 
     - **Advance watermark cursor** only after ALL episodes from this invocation have completed successfully (if unfiltered run). Set `state.last_podcast` to `{mtime: <last file mtime>, path: <last file path>}` where "last file" is the last file across all episode groups in the sorted batch (oldest-first order).
     - Run auto-cleanup (see Cleanup Workflow)
     - Write updated state to file
-    - **Write sidecar manifest:** Write `<audio_path>.manifest.yaml` alongside the generated
-      MP3 file. Include: `audio` (filename), `topic` (short English topic label derived from
-      the lesson group name), `notebook_id`, `generated_date`, `depth` estimated from source
-      lesson complexity, `concepts_covered` extracted from source lesson headings and content,
-      `open_threads` from related topics mentioned but not deeply covered, and `source_lessons`
-      as the basenames of the lesson files used. **Do NOT write to `episodes.yaml`** — that is
-      `kb-publish`'s responsibility (single-writer rule).
+    - **Update run record:** Populate `state.runs[...]` with:
+      - `params_hash`, `postproc_hash` (from step 6b')
+      - `podcast_outputs` object:
+        ```yaml
+        podcast_outputs:
+          raw_audio: <output_path>/<stem>.raw.mp3
+          final_audio: <output_path>/<stem>.mp3
+          vtt: <output_path>/<stem>.vtt             # null if transcript disabled/failed
+          transcript_md: <output_path>/<stem>.transcript.md    # null if transcript disabled/failed
+          manifest: <output_path>/<stem>.mp3.manifest.yaml
+          intro_applied: <bool from background-agent JSON; top-level `intro_applied`>
+          transcript_applied: <bool from background-agent JSON; nested `transcript.applied`>
+          vtt_offset_seconds: <float from background-agent JSON `vtt_offset_used`>
+        ```
+      - Keep `artifacts[0].output_files = [final_audio]` for backward compatibility.
+    - **Write sidecar manifest:** Write `<output_path>/<stem>.mp3.manifest.yaml` alongside the generated
+      MP3 file. Include the existing fields (`audio`, `topic`, `notebook_id`, `generated_date`, `depth`,
+      `concepts_covered`, `open_threads`, `source_lessons`) AND the new fields:
+      ```yaml
+      intro_applied: <bool>
+      hosts: [<host_pool[0]>, <host_pool[1]>]
+      transcript:
+        vtt: <basename of vtt or null>
+        markdown: <basename of transcript_md or null>
+        applied: <bool>
+        speaker_count: <int>
+      ```
+      **Do NOT write to `episodes.yaml`** — that is `kb-publish`'s responsibility (single-writer rule).
 
 **Session recovery:** If a future invocation finds a run with artifact `status: pending`, check artifact status via `notebooklm artifact list -n <notebook_id> --json`. If `completed`, download and finalize. If `in_progress`, re-wait. If `failed`, mark accordingly.
 
@@ -769,7 +936,7 @@ If notebook was cleaned up or inaccessible:
 
 ### Cleanup Workflow
 
-**Command:** `cleanup [--days N]`
+**Command:** `cleanup [--days N] [--raw-audio]`
 
 1. Read `notebooks` from state file
 
@@ -780,9 +947,19 @@ If notebook was cleaned up or inaccessible:
 
 3. Also clean up `pending` or `failed` notebooks older than 1 day (likely orphaned)
 
-4. Prune `runs` older than `cleanup_days * 2`
+4. Prune `runs` older than `cleanup_days * 2`. For each pruned podcast run whose
+   record contains `podcast_outputs.raw_audio`:
+   - If the file exists on disk, delete it. Log the deletion.
+   - Preserve `final_audio`, `vtt`, `transcript_md`, and `manifest` — those are
+     the user's deliverables and may still be referenced by `kb-publish` state.
 
-5. Write state (atomic)
+5. If `--raw-audio` is passed: also scan all current (non-pruned) podcast runs and
+   delete every `podcast_outputs.raw_audio` file that exists, after user confirmation.
+   Update each affected run record to set `raw_audio` to null (so future dedup knows
+   the raw is no longer available — fall back to regeneration if post-processing
+   settings change).
+
+6. Write state (atomic).
 
 ### Status Workflow
 

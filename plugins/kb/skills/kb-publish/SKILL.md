@@ -45,6 +45,14 @@ episodes:
     open_threads:
       - "Tensor Cores and mixed-precision training"
     source_lessons: []
+    # Post-processing metadata (opaque to kb-publish; populated by kb-notebooklm sidecar):
+    intro_applied: true      # or false; null for non-NotebookLM audio
+    hosts: ["瓜瓜龙", "海发菜"]
+    transcript:
+      vtt: podcast-hardware-2026-04-12.vtt
+      markdown: podcast-hardware-2026-04-12.transcript.md
+      applied: true
+      speaker_count: 2
 next_id: 2                   # next publication ID
 ```
 
@@ -130,8 +138,8 @@ If found:
 2. **Validate:** confirm `manifest.audio == basename(audio_path)`. If mismatch, warn and skip import.
 3. Check if a registry entry with matching `audio` key already exists.
 4. If existing entry has `status: published`: skip import (entry is frozen). Log warning.
-5. If existing entry has `status: generated` or `draft`: merge any fields from the sidecar that are currently null/empty.
-6. If no existing entry: create a schema-complete entry with `status: generated`, `id: null`, `title: null`, `description: null`, `date: null`, and all content manifest fields from the sidecar (`topic`, `depth`, `concepts_covered`, `open_threads`, `source_lessons`, `notebook_id`).
+5. If existing entry has `status: generated` or `draft`: merge any fields from the sidecar that are currently null/empty. This includes the new post-processing fields (`intro_applied`, `hosts`, `transcript.*`) — preserve them on the registry entry even though `kb-publish` does not interpret their values.
+6. If no existing entry: create a schema-complete entry with `status: generated`, `id: null`, `title: null`, `description: null`, `date: null`, all content manifest fields from the sidecar (`topic`, `depth`, `concepts_covered`, `open_threads`, `source_lessons`, `notebook_id`), AND the new post-processing fields from the sidecar (pass through opaquely): `intro_applied`, `hosts`, and the nested `transcript` object (`vtt`, `markdown`, `applied`, `speaker_count`). Treat these as opaque — `kb-publish` does not interpret their values.
 7. Write the registry atomically (write to temp file, rename).
 8. Delete the sidecar file only after successful registry write.
 
@@ -343,6 +351,7 @@ Based on the JSON result:
    - If publishing and `id` is `null`: assign `id` from `next_id`, set `date` to today, increment `next_id`.
    - Merge `title`, `description`, and `topic` from the current upload.
    - Content manifest fields (`concepts_covered`, `open_threads`, `source_lessons`, `depth`) are already populated from the sidecar — preserve them.
+   - **Post-processing fields** (`intro_applied`, `hosts`, `transcript`) are already populated from the sidecar — preserve them. Do not overwrite or null them out.
 5. **If no entry exists** (new audio without prior generation):
    - Create a schema-complete entry with all fields:
      - `audio`: `basename(audio_path)`
@@ -357,6 +366,9 @@ Based on the JSON result:
      - `concepts_covered`: from key concepts in Step 3
      - `open_threads`: `[]` (unknown for non-NotebookLM audio)
      - `source_lessons`: `[]`
+     - `intro_applied`: `null` (unknown for non-NotebookLM audio)
+     - `hosts`: `null` (unknown)
+     - `transcript`: `null` (unknown)
 6. Write `episodes.yaml` atomically (write to temp file, rename).
 
 ---
