@@ -46,11 +46,18 @@ Host naming is handled purely at the prompt layer: `prompts/podcast-tutor.md` ga
 1. notebooklm artifact wait            # existing
 2. notebooklm download audio           # existing → <out>/podcast-<theme>-YYYY-MM-DD.raw.mp3
 3. python assemble_audio.py            # new → <out>/podcast-<theme>-YYYY-MM-DD.mp3
-4. python transcribe_audio.py          # new → <out>/*.vtt + *.transcript.md
+                                       #   (or cp raw→final if intro skipped/failed)
+4. python transcribe_audio.py          # new, INPUT is raw audio, OUTPUT is offset by the
+                                       #   ACTUAL final offset (0 if assembly fell back)
+                                       #   → <out>/*.vtt + *.transcript.md
 5. Report back with all file paths + per-stage warnings
 ```
 
-Steps 3 and 4 are skippable independently: no intro music configured → skip 3 (just rename raw→final); `transcript.enabled: false` or hard error → skip 4. The MP3 is the primary deliverable; transcript is best-effort.
+**Why assemble first, but transcribe from raw audio:** Transcription needs two things: (a) clean speech-only audio to avoid pyannote being confused by the music bed, and (b) a correct timestamp offset for the final MP3. Running assembly first tells us the ACTUAL `final_offset_seconds` (0 if assembly was skipped or failed, `effective_intro_length - effective_crossfade` if it succeeded). We then feed the raw MP3 to Whisper/pyannote but offset the VTT timestamps by the actual final offset. This keeps diarization clean while guaranteeing VTT aligns with the delivered final audio.
+
+**Retaining `.raw.mp3`:** The raw file stays on disk after assembly so post-processing can be re-run without re-generating. The existing `cleanup_days * 2` state-prune mechanism only prunes run records, not output files — so `.raw.mp3` files accumulate unless we actively manage them. See section 6 below for the explicit cleanup policy.
+
+Steps 3 and 4 are skippable independently: no intro music configured → skip 3 (cp raw→final, `vtt_offset=0`); `transcript.enabled: false` or hard error → skip 4. The MP3 is the primary deliverable; transcript is best-effort. If step 3 fails but step 4 has been requested, step 4 proceeds with `vtt_offset=0` because the final is the raw.
 
 ### Config additions (`kb.yaml`)
 
@@ -69,13 +76,18 @@ integrations:
       extra_host_names: []                       # optional overflow pool for diarization with >2 clusters
 
       transcript:
-        enabled: true                            # default true
+        enabled: <set by kb-init>                # true if HF token + both licenses accepted, else false
         model: "large-v3"                        # faster-whisper model size
-        device: "auto"                           # auto | cpu | mps | cuda
+        device: "auto"                           # auto | cpu | cuda (mps not supported)
         language: "zh"                           # whisper language hint
 ```
 
-All four blocks are optional — with no config, the skill runs with built-in defaults (no intro music, default hosts, transcript enabled).
+All four blocks are optional — with no config, the skill runs with built-in defaults. Notes on defaults:
+
+- `intro_music`: no default; intro is skipped when missing.
+- `hosts`: default `["瓜瓜龙", "海发菜"]` built into the skill.
+- `transcript.enabled`: kb-init writes an explicit value based on whether the HF token + pyannote licenses are in place at setup. If kb-init has never run (e.g., a project that predates this spec), `enabled` is absent and the skill treats it as `false` — better to silently skip transcripts than to emit per-episode HF errors. The user can set `enabled: true` manually after completing HF setup.
+- All other `transcript.*` keys have reasonable built-in defaults.
 
 ### New files
 
@@ -86,8 +98,9 @@ All four blocks are optional — with no config, the skill runs with built-in de
 ### Modified files
 
 - `plugins/kb/skills/kb-notebooklm/prompts/podcast-tutor.md` — brand fix, `{hosts}` placeholder, HOST INTRODUCTION section.
-- `plugins/kb/skills/kb-notebooklm/SKILL.md` — updated podcast workflow (step 6i for prompt injection, step 6k for extended background agent script, step 7 for new sidecar fields).
-- `plugins/kb/skills/kb-init/SKILL.md` — adds `faster-whisper` / `pyannote.audio` to the notebooklm venv setup, prompts user for HuggingFace token.
+- `plugins/kb/skills/kb-notebooklm/SKILL.md` — workflow reorder (render prompt in new step 6a' BEFORE hashing in 6b'); dedup algorithm with `postproc_hash` + `postproc_complete` predicate; `podcast_outputs` in run record; step 6i uses pre-rendered prompt; step 6k extended background agent (assemble, then transcribe raw audio using the actual offset); step 7 new sidecar fields; Cleanup workflow deletes `raw_audio` when pruning records; new `cleanup --raw-audio` option.
+- `plugins/kb/skills/kb-publish/SKILL.md` — sidecar import (step 2b) and registry update (step 8b) extended to preserve `intro_applied`, `hosts`, and `transcript` fields through state transitions.
+- `plugins/kb/skills/kb-init/SKILL.md` — adds `faster-whisper` / `pyannote.audio` to the notebooklm venv setup; ffmpeg check; HuggingFace token + both pyannote license prompts; persists `transcript.enabled` based on setup outcome.
 
 ## Detailed Design
 
@@ -167,50 +180,71 @@ Persist the resolved `host_pool[:2]` in the sidecar manifest as `hosts: [<host0>
 
 ```
 ffmpeg -y \
-  -t {intro_length} -i {intro} \
+  -t {effective_intro_length} -i {intro} \
   -i {raw_audio} \
-  -filter_complex "[0:a][1:a]acrossfade=d={crossfade}:c1=tri:c2=tri[a]" \
+  -filter_complex "[0:a][1:a]acrossfade=d={effective_crossfade}:c1=tri:c2=tri[a]" \
   -map "[a]" -c:a libmp3lame -b:a 192k \
   {output}
 ```
 
-- `-t {intro_length}` trims the intro to exactly `intro_length` seconds. The crossfade overlaps the last `crossfade` seconds of that clip with the first `crossfade` seconds of the podcast, so the listener hears ~`(intro_length - crossfade)` seconds of music-only, then `crossfade` seconds of music fading into dialogue.
+- `-t {effective_intro_length}` trims the intro to exactly that many seconds. `acrossfade` overlaps the tail of input 1 with the head of input 2 for `{effective_crossfade}` seconds, producing total output duration `effective_intro_length + raw_audio_duration - effective_crossfade`.
+- The listener hears `(effective_intro_length - effective_crossfade)` seconds of music-only, then `effective_crossfade` seconds of music fading into dialogue.
 - `c1=tri c2=tri` uses triangular fade curves (smooth, no clicks).
 - Output is MP3 @ 192 kbps (matches NotebookLM's quality).
 
-**Preflight validation:** Probe the intro file with `ffprobe -v error -show_entries format=duration -of default=nokey=1:noprint_wrappers=1 {intro}` to get its duration. If `duration < intro_length + crossfade` — for example an 8s file when config asks for 12s+3s — clamp `intro_length = duration - crossfade` and warn. If `duration < crossfade + 1`, skip assembly entirely with a warning.
+**Preflight validation:** Probe the intro with `ffprobe -v error -show_entries format=duration -of default=nokey=1:noprint_wrappers=1 {intro}` to get `intro_duration`. Compute:
+
+```
+effective_intro_length = min(requested_intro_length, intro_duration)
+effective_crossfade    = min(requested_crossfade, effective_intro_length - 0.5)
+```
+
+`acrossfade` overlaps inside the intro length itself, so `intro_duration >= effective_intro_length` is the only hard requirement. The `effective_crossfade < effective_intro_length` constraint (`- 0.5` keeps at least 0.5s of music-only head) prevents degenerate cases. If `intro_duration < 1.5s`, skip assembly with a warning (too short to be a meaningful intro).
+
+Emit warnings when values are clamped so the user knows the intro file is smaller than configured.
 
 **Error handling:**
 
 | Condition | Behavior |
 |---|---|
-| `intro_music` missing/null in kb.yaml | Skill skips calling `assemble_audio.py`; renames raw→final. |
-| `intro_music` path doesn't exist | Warn, skip assembly, rename raw→final. Do NOT fail the episode. |
+| `intro_music` missing/null in kb.yaml | Skill skips calling `assemble_audio.py`; copies raw→final (`cp`, not `mv`, to retain `.raw.mp3`). |
+| `intro_music` path doesn't exist | Warn, skip assembly, copy raw→final. Do NOT fail the episode. |
 | Intro clip too short for configured crossfade | Clamp as above, or skip with warning. |
 | ffmpeg nonzero exit | Keep the raw MP3 as final output, log ffmpeg stderr, set `intro_applied: false` in sidecar manifest. |
 
 **Outputs:**
 
 - `--output` file written on success.
-- JSON to stdout (when `--json` set): `{"success": bool, "intro_applied": bool, "output": "<path>", "duration_seconds": <number>, "warnings": [<str>...], "error": "<str>" or null}`
+- JSON to stdout (when `--json` set): `{"success": bool, "intro_applied": bool, "output": "<path>", "duration_seconds": <number>, "effective_intro_length": <number>, "effective_crossfade": <number>, "final_offset_seconds": <number>, "warnings": [<str>...], "error": "<str>" or null}`
+- `final_offset_seconds` is `effective_intro_length - effective_crossfade` on success, `0` on failure. This is the single source of truth for the VTT offset: step 6k reads it directly from this JSON rather than recomputing, so any future script-side clamping changes flow through automatically.
 
 ### 4. Transcription — `transcribe_audio.py`
 
 **Inputs (CLI):**
 
 ```
---audio PATH               # the FINAL assembled MP3 (with intro)
+--audio PATH               # the RAW NotebookLM MP3 (pre-assembly, no music)
 --hosts JSON               # JSON array of candidate host names, longest pool first
                            #   e.g. '["瓜瓜龙","海发菜","嘉宾C"]'
 --output-vtt PATH
 --output-md PATH
+--vtt-offset-seconds FLOAT # add this offset to all VTT timestamps so captions
+                           # align to the FINAL MP3 (which may start with music).
+                           # Default 0 (no offset). The skill passes
+                           # `actual_vtt_offset`, which equals
+                           # `effective_intro_length - effective_crossfade`
+                           # ONLY when assembly actually succeeded; if assembly
+                           # was skipped or failed (the final is the raw),
+                           # the skill passes 0. Never assume this value from
+                           # config alone — derive it from assembly outcome.
 --model NAME               # default from config: large-v3
---device {auto|cpu|mps|cuda}   # default auto
+--device {auto|cpu|cuda}   # default auto → cpu on macOS, cuda if available on Linux/NVIDIA
 --language STR             # default zh
---hf-cache-dir PATH        # optional override; default HF_HOME / ~/.cache/huggingface
---title STR                # optional transcript H1 title
+--title STR                # optional transcript H1 title (default derived from filename)
 --json
 ```
+
+Note: `mps` is intentionally omitted — faster-whisper does not support Metal / MPS (see SYSTRAN/faster-whisper issue #911). Apple Silicon runs on CPU; CTranslate2 CPU is highly optimized and a ~30-minute podcast transcribes in a few minutes. The `HF_HOME` env var is respected through the normal HuggingFace cache mechanism; no custom cache flag is needed.
 
 **Model reuse (important — do NOT re-download):**
 
@@ -239,8 +273,8 @@ whisper_segments = [
 ]
 ```
 
-- `vad_filter=True` skips the music-only portion cleanly so the transcript starts when dialogue starts (not "music playing" or hallucinated text).
-- `device="auto"` resolves to `mps` on Apple Silicon, `cuda` if available, otherwise `cpu`.
+- `vad_filter=True` reduces hallucinations in silent regions. Since we transcribe the RAW audio (no music), the `vad_filter` is not load-bearing for music skipping — it's just a general quality improvement.
+- `device="auto"` resolves to `cuda` if available on Linux/NVIDIA, otherwise `cpu`. On macOS (Apple Silicon or Intel), we always use `cpu` because faster-whisper / CTranslate2 does not support Metal/MPS. CPU performance with `compute_type="auto"` (typically `int8_float16` or `int8`) is adequate for episode-length audio.
 
 #### 4.2 Diarization stage (pyannote.audio)
 
@@ -251,53 +285,67 @@ pipeline = Pipeline.from_pretrained(
     "pyannote/speaker-diarization-3.1",
     use_auth_token=os.environ.get("HUGGINGFACE_TOKEN"),
 )
-# Pin the search range. Do NOT pin num_speakers=2 exactly — music bed can fool the model.
-diarization = pipeline(
-    args.audio,
-    min_speakers=2,
-    max_speakers=max(2, len(host_pool)),
-)
+# NotebookLM always produces a two-host podcast. Since we're diarizing the raw
+# (music-free) audio, pinning num_speakers=2 is safe and eliminates pathological
+# 1-cluster / 3-cluster outcomes.
+diarization = pipeline(args.audio, num_speakers=2)
 diarization_turns = [
     {"start": turn.start, "end": turn.end, "speaker": label}
     for turn, _, label in diarization.itertracks(yield_label=True)
 ]
 ```
 
-Pyannote labels speakers as `SPEAKER_00`, `SPEAKER_01`, etc.
+Pyannote labels speakers as `SPEAKER_00`, `SPEAKER_01`, etc. With `num_speakers=2`, there will always be exactly 2 distinct labels (or 1 if pyannote fails to detect a second speaker in a very short clip).
+
+The `extra_host_names` pool is retained in config because it's low-cost future-proofing: if NotebookLM ever offers a debate format with 3+ voices, or if the user manually edits a transcript with a guest speaker, the pool is available. For this spec's scope, only the first 2 entries are used.
 
 #### 4.3 Alignment + labeling
 
-For each whisper segment, find the diarization turn with the largest time-overlap and assign its `speaker_id`. Then map `speaker_id → host_name`:
+Whisper segments can span multiple diarization turns, especially during fast host exchanges. Naive "one speaker per whisper segment" labeling would mis-assign whole segments when a turn change happens mid-segment. The labeling logic uses word-level timestamps (which we already collected via `word_timestamps=True`) to split at diarization boundaries:
 
-- Sort distinct `speaker_id`s by their first-appearance timestamp.
-- Map `speaker_id[0]` → `host_pool[0]` (瓜瓜龙 by default).
-- Map `speaker_id[1]` → `host_pool[1]` (海发菜 by default).
-- Map `speaker_id[i]` → `host_pool[i]` if the pool has enough entries.
-- If the pool is exhausted, synthesize fallback labels: `嘉宾A`, `嘉宾B`, `嘉宾C`, …
+1. For each whisper segment, iterate its words with their `(start, end)` timestamps.
+2. For each word, find the diarization turn that contains its midpoint `(start + end) / 2`. If no turn contains it, use the turn with the largest overlap or (if none) the most recent speaker.
+3. Group consecutive words with the same speaker into sub-segments. Each sub-segment inherits its own `(start, end)` from its first and last words.
+4. Treat each sub-segment as a VTT cue and as a transcript turn.
 
-Rationale for ordering by first appearance: the prompt (section 1) instructs `host_pool[0]` to speak first in the self-introduction, so this mapping is reliable. If it ever inverts for a given episode, users can swap `hosts` order in `kb.yaml` or edit the plain-text transcript.
+When a whisper segment is cleanly within a single diarization turn (the common case), this degenerates to the whole-segment rule. When it spans two turns, it is split into two sub-segments with correct speaker labels.
+
+After sub-segmentation, map `speaker_id → host_name`:
+
+1. Build the list of speaker labels in order of **first aligned speech segment** — i.e., for each distinct `speaker_id`, find the earliest whisper segment that aligned to it, sort by that timestamp. (Using the earliest aligned speech, not the earliest raw diarization turn, avoids being fooled by spurious pre-dialogue diarization activity.)
+2. Map the first distinct `speaker_id` → `host_pool[0]` (瓜瓜龙 by default).
+3. Map the second distinct `speaker_id` → `host_pool[1]` (海发菜 by default).
+4. If a third or further speaker ever appears (possible if user swaps in a guest-format audio, not with default NotebookLM two-host output): use `host_pool[i]` if available, else synthesize `嘉宾A`, `嘉宾B`, …
+
+**Self-intro validation (best-effort):** After labeling, inspect the first speech segment assigned to `host_pool[0]`. If its text contains `host_pool[1]`'s name but NOT `host_pool[0]`'s name, and the first segment for `host_pool[1]` contains `host_pool[0]`'s name but not its own, swap the mapping. This catches the rare case where the hosts disobey the prompt ordering. Log the swap as a warning so the user can confirm.
 
 **Edge cases:**
 
 - **Whisper segment has no overlapping diarization turn** (silence or edge of clip): assign to the most recently labeled speaker. If at the very start, assign to `host_pool[0]`.
-- **Diarization produces only 1 cluster** (music fooled it, or very short episode): label everything as `host_pool[0]`, log warning.
-- **Diarization produces >len(pool) clusters**: use pool first, then synthesize `嘉宾A/B/C`.
+- **Diarization returns only 1 cluster** (should not happen with `num_speakers=2` on two-speaker audio, but possible with malformed input): label everything as `host_pool[0]`, log warning.
+- **Diarization returns >2 clusters** (pyannote ignores `num_speakers` hint in unusual cases): use `host_pool[i]` in first-appearance order, fall back to `嘉宾A/B/C` only if pool is exhausted.
 
 #### 4.4 Output formats
 
 **WebVTT** (`<output-vtt>`):
 
+VTT timestamps are written as `segment.start + vtt_offset_seconds` and `segment.end + vtt_offset_seconds`, where `vtt_offset_seconds` is passed via CLI by the skill as `actual_vtt_offset`. That value is `effective_intro_length - effective_crossfade` ONLY when assembly actually succeeded (e.g., 9s for default 12s + 3s); if assembly was skipped or failed and the final is the raw audio, `actual_vtt_offset = 0`. This guarantees cues always align to the delivered final MP3 regardless of assembly outcome.
+
+Example for a default 12s + 3s intro (offset = 9s), where raw dialogue starts at 0.240s:
+
 ```
 WEBVTT
 
-00:00:00.240 --> 00:00:04.120
+00:00:09.240 --> 00:00:13.120
 <v 瓜瓜龙>大家好, 欢迎收听全栈AI, 我是瓜瓜龙.
 
-00:00:04.120 --> 00:00:09.560
+00:00:13.120 --> 00:00:18.560
 <v 海发菜>我是海发菜. 今天我们要聊的是 KV Cache.
 ```
 
-One cue per whisper segment. Use `<v NAME>...` voice tag so WebVTT-aware players can style per-speaker.
+One cue per aligned sub-segment (after splitting whisper segments at diarization boundaries — see section 4.3). Use `<v NAME>...` voice tag so WebVTT-aware players can style per-speaker.
+
+When `--vtt-offset-seconds 0` (no intro, or user requests raw-aligned VTT), cues start near 0.
 
 **Markdown** (`<output-md>`):
 
@@ -309,7 +357,9 @@ One cue per whisper segment. Use `<v NAME>...` voice tag so WebVTT-aware players
 **海发菜:** 我是海发菜. 今天我们要聊的是 KV Cache.
 ```
 
-Consecutive segments from the same speaker are merged into one paragraph (joined by a space, trimming redundant whitespace). The H1 title is taken from `--title` or derived from the audio filename (`podcast-<theme>-YYYY-MM-DD.mp3` → `全栈AI — <theme> (YYYY-MM-DD)`). Always prefixes the title with `全栈AI — ` per brand.
+Consecutive segments from the same speaker are merged into one paragraph (joined by a space, trimming redundant whitespace).
+
+**Title handling:** If `--title` is provided, use it verbatim (no prefixing). If `--title` is omitted, derive from the audio filename: `podcast-<theme>-YYYY-MM-DD.raw.mp3` → `全栈AI — <theme> (YYYY-MM-DD)`. The skill always passes an explicit `--title`, so the script-side derivation is just a fallback for standalone invocations.
 
 **Error handling:**
 
@@ -325,13 +375,20 @@ Consecutive segments from the same speaker are merged into one paragraph (joined
 
 ### 5. SKILL.md changes — step 6k (extended background agent prompt)
 
-The existing step 6k dispatches a background agent with a prompt telling it to `notebooklm artifact wait` then `notebooklm download audio`. Extended prompt:
+The existing step 6k dispatches a background agent to `notebooklm artifact wait` and `notebooklm download audio`. Extended prompt (assemble-first so transcription sees the actual final offset):
 
 Note: `<filename_stem>` below is the per-episode filename stem (without extension), e.g., `podcast-kv-cache-2026-04-20`. Derived using the same rules as the existing skill (section "Output filename logic" in SKILL.md).
 
+**Shell safety:** Every path interpolated into a shell command must be quoted (prefer passing values through argv arrays to `subprocess.run` directly, or use `shlex.quote` when a shell string is unavoidable). Configured paths can contain spaces, Chinese characters, or other shell-special characters. All command templates in this spec are illustrative — the implementation must not inline unquoted user-controlled values.
+
+The main conversation computes, BEFORE dispatching the agent:
+- `effective_intro_length` and `effective_crossfade` via ffprobe (if intro music configured and the file exists), using the formula from section 3. These belong to `postproc_hash` ONLY — they do NOT go into `params_hash`. If the intro file is missing, too short, or not configured, set `intro_music_configured = false`, `effective_intro_length = 0`, `effective_crossfade = 0`, `desired_vtt_offset = 0`, and compute `postproc_hash` with those zero values (stable hash input).
+- `desired_vtt_offset = effective_intro_length - effective_crossfade` (this is what we WANT; the ACTUAL offset depends on whether assembly succeeds).
+- The title string: `全栈AI — <theme> (YYYY-MM-DD)` — no double-prefix since the script preserves explicit --title verbatim.
+
 ```
 Wait for artifact <artifact_id> in notebook <notebook_id> to complete, then download,
-assemble with intro music, and transcribe.
+assemble with intro music, then transcribe with the correct offset.
 
 1. source <venv>/bin/activate && notebooklm artifact wait <artifact_id> -n <notebook_id> --timeout 2700
    If exit != 0, report and stop.
@@ -339,41 +396,51 @@ assemble with intro music, and transcribe.
 2. source <venv>/bin/activate && notebooklm download audio <output_path>/<filename_stem>.raw.mp3 -n <notebook_id>
    If exit != 0, report and stop.
 
-3. If {intro_music_configured}:
+3. intro_applied = false       # will be set true if assembly succeeds
+   actual_vtt_offset = 0
+   If {intro_music_configured}:
       python3 <skill_dir>/scripts/assemble_audio.py \
         --raw-audio <output_path>/<filename_stem>.raw.mp3 \
         --intro <intro_music> \
         --output <output_path>/<filename_stem>.mp3 \
-        --intro-length <intro_music_length_seconds> \
-        --crossfade <intro_crossfade_seconds> \
+        --intro-length <effective_intro_length> \
+        --crossfade <effective_crossfade> \
         --json
-      Record intro_applied and any warnings from the JSON.
-      If assembly fails, mv <filename_stem>.raw.mp3 <filename_stem>.mp3 (fallback) and record intro_applied=false.
+      Parse the JSON.
+      If success AND intro_applied=true:
+         intro_applied = true
+         actual_vtt_offset = <final_offset_seconds from assembly JSON>   # single source of truth
+      Else:
+         cp <output_path>/<filename_stem>.raw.mp3 <output_path>/<filename_stem>.mp3
+         intro_applied = false
+         actual_vtt_offset = 0
    Else:
-      mv <output_path>/<filename_stem>.raw.mp3 <output_path>/<filename_stem>.mp3
-      intro_applied = false (not configured).
+      cp <output_path>/<filename_stem>.raw.mp3 <output_path>/<filename_stem>.mp3
+      intro_applied = false
 
 4. If {transcript_enabled}:
       python3 <skill_dir>/scripts/transcribe_audio.py \
-        --audio <output_path>/<filename_stem>.mp3 \
+        --audio <output_path>/<filename_stem>.raw.mp3 \
         --hosts '<json-encoded host pool>' \
         --output-vtt <output_path>/<filename_stem>.vtt \
         --output-md <output_path>/<filename_stem>.transcript.md \
+        --vtt-offset-seconds <actual_vtt_offset> \
         --model <model> \
         --device <device> \
         --language <language> \
         --title "全栈AI — <theme> (YYYY-MM-DD)" \
         --json
-      Record transcript.applied, speaker_count, and warnings from the JSON.
-      Transcription failure must NOT fail the episode — the MP3 is the primary deliverable.
+      Record transcript.applied, speaker_count, warnings.
+      Transcription failure must NOT fail the episode.
    Else:
-      transcript.applied = false (disabled).
+      transcript.applied = false
 
-5. Report JSON with all produced file paths + per-stage status:
+5. Report JSON with all file paths + per-stage status:
    {
-     "raw_audio": "...",
-     "final_audio": "...",
+     "raw_audio": "<output_path>/<filename_stem>.raw.mp3",
+     "final_audio": "<output_path>/<filename_stem>.mp3",
      "intro_applied": bool,
+     "vtt_offset_used": <seconds>,
      "transcript": {"vtt": "...", "markdown": "...", "applied": bool, "speaker_count": int},
      "warnings": [...]
    }
@@ -381,7 +448,144 @@ assemble with intro music, and transcribe.
 
 The agent does not write state — it only produces files and reports. The main conversation (step 7) updates state and writes the sidecar manifest using the reported values.
 
-### 6. Sidecar manifest — extended fields
+**Raw MP3 retention:** Use `cp` (not `mv`) in every no-intro / assembly-fallback branch so the raw file is retained alongside the final, enabling future re-assembly/re-transcription without re-generation. The raw file is deleted when its run record is pruned (see section 6) or via explicit `cleanup --raw-audio`.
+
+### 6. Dedup, workflow ordering, and session recovery
+
+The existing `params_hash` for the podcast workflow covers `format + length + language + instruction_template`, and the current SKILL.md computes it in step 6b — BEFORE prompt rendering in step 6i. That ordering is broken for this spec: the host pool, brand fix, and series bible all flow through the rendered prompt, so if hashing runs before rendering, none of those changes bust the hash.
+
+**Required workflow reorder (in `kb-notebooklm/SKILL.md`):**
+
+Move host resolution, series-bible compilation, and full prompt rendering from step 6i to a new step 6a' that runs before the dedup hash in step 6c. Concretely:
+
+```
+6a. Limit sources (existing)
+6a'. (NEW) Resolve host pool, compile series bible, render podcast-tutor.md → rendered_prompt
+6b. Compute sources_hash (existing)
+6b'. (NEW) Compute params_hash using rendered_prompt, and postproc_hash using post-processing settings
+6c. Dedup check against both hashes
+6d. Empty-selection check
+6e-6h. Create notebook, persist, add sources, wait (existing)
+6i. Call notebooklm generate audio using the already-rendered prompt
+6j-6k. Persist run record, spawn background agent
+```
+
+This ensures host/prompt/brand changes bust `params_hash` deterministically.
+
+**New `params_hash` composition for podcast workflow:**
+
+```
+params_hash = sha256(
+    format
+  + length
+  + language
+  + sha256(rendered_prompt)           # captures {series_context}, {lesson_list}, {hosts},
+                                      # brand text — any prompt change busts the hash
+  + JSON(host_pool[:2])               # explicit, in case prompt templating ever changes
+)
+```
+
+Intro music and transcript settings are NOT part of `params_hash`. Only prompt-affecting settings go here.
+
+**Post-processing re-run without re-generation:**
+
+A second hash, `postproc_hash`, captures only the post-processing parameters:
+
+```
+postproc_hash = sha256(
+    intro_music_path
+  + intro_music_mtime
+  + intro_music_size                  # guards against same-path replacement w/ preserved mtime
+  + intro_music_content_sha256        # authoritative: detects any content change
+  + requested_intro_length            # user intent — changing config should refresh metadata
+  + requested_crossfade_seconds       # even when clamping makes effective values equal
+  + effective_intro_length            # derived — changes with file or clamp
+  + effective_crossfade               # derived — changes with file or clamp
+  + transcript.enabled
+  + transcript.model
+  + transcript.language
+  + JSON(host_pool)                   # transcript uses full pool for labeling
+)
+```
+
+**On content-hashing the intro file:** Intro music files are small (typically <1 MB for 10-15s clips) and hashed once per run, so reading + SHA-256 is negligible (<50ms). This is the authoritative change-detector — `mtime` + `size` are fallbacks for robustness. If a user replaces the file with identical content (unusual), no re-assembly happens, which is correct.
+
+**On including requested values:** Including both `requested_*` and `effective_*` means changing `intro_crossfade_seconds` from 3 to 2 busts the hash even if the intro file is so short that both clamp to the same effective value. The user's config intent is respected, and the refreshed run surfaces any new clamp warnings. This is a deliberate choice over the alternative (semantic-output-only) — users editing config values expect to see the result reflected.
+
+If the intro file path is null (intro not configured), all intro-related fields in the hash are set to empty strings for deterministic hashing.
+
+**Completeness predicate.** Beyond hash matching, determine whether the stored run is actually fully processed:
+
+```
+postproc_complete(run) =
+  final_audio exists AND
+  (intro_music_configured ? run.podcast_outputs.intro_applied == true : true) AND
+  (transcript_enabled ? (
+      run.podcast_outputs.transcript_applied == true AND
+      run.podcast_outputs.vtt exists AND
+      run.podcast_outputs.transcript_md exists
+  ) : true)
+```
+
+The `manifest` path in `podcast_outputs` is NOT part of the completeness check — it's transient (kb-publish deletes it after consumption) and its absence is a good state, not an incomplete one. The recovery logic must explicitly exclude `manifest` from existence checks.
+
+Dedup extended algorithm (in step 6c of the workflow):
+
+1. Match `workflow + sources_hash + params_hash`.
+2. If match found with all artifacts `completed`:
+   - If `postproc_hash` matches AND `postproc_complete(run)` is true: skip entirely.
+   - If `postproc_hash` differs OR `postproc_complete(run)` is false:
+     - If `raw_audio` exists on disk: re-run post-processing only (assembly + transcription from the retained raw).
+     - If `raw_audio` missing: fall back to full regeneration, warn user.
+3. If match found with any artifact `pending`: session recovery as today.
+4. If match found with any artifact `failed`: partial retry as today.
+5. No match: full generation.
+
+**Why the `postproc_complete` predicate matters:** a run whose transcription failed with `transcript.enabled=true` has `transcript_applied=false` even though the hash matches. Without the predicate, the second run would also skip. With the predicate, the second run sees the work is incomplete and retries — consistent with "fixing HF/token issues and rerunning should recover" user expectation.
+
+**Failures that persistently block the predicate** (e.g., user never fixes HF token) will not cause NotebookLM regeneration because the raw audio is retained and re-post-processing is cheap. The user simply sees "transcript still failing — check HF setup" until they resolve the underlying issue.
+
+**Extended run record schema:** The current run record stores `artifacts[].output_files`. For post-processing recovery to work reliably, the podcast run record needs a structured `podcast_outputs` object with explicit paths:
+
+```yaml
+runs:
+  - workflow: podcast
+    sources_hash: sha256...
+    params_hash: sha256...
+    postproc_hash: sha256...          # NEW — post-processing parameters
+    podcast_outputs:                  # NEW — structured post-processing outputs
+      raw_audio: /abs/path/podcast-<stem>.raw.mp3
+      final_audio: /abs/path/podcast-<stem>.mp3
+      vtt: /abs/path/podcast-<stem>.vtt           # null if transcript disabled/failed
+      transcript_md: /abs/path/podcast-<stem>.transcript.md
+      manifest: /abs/path/podcast-<stem>.mp3.manifest.yaml
+      intro_applied: true|false
+      transcript_applied: true|false
+    artifacts:
+      - type: audio
+        status: completed
+        output_files: [<final_audio path>]  # kept for backwards compat
+    notebook_id: ...
+```
+
+Post-processing recovery reads `podcast_outputs`, checks existence of each referenced file, and:
+- If `raw_audio` exists and `postproc_hash` differs from current config: re-run post-processing only.
+- If `raw_audio` missing but `final_audio` exists and matches current `postproc_hash`: treat as completed, no action.
+- If `raw_audio` missing and `postproc_hash` differs: fall back to full regeneration.
+
+`kb-publish` consumes only `<final_audio>.manifest.yaml` (the sidecar), which it deletes after import. The run record's `manifest` field points to that path but is understood to be transient — if the file is gone, that just means kb-publish has already consumed it (a good state, not an error).
+
+**Forward migration:** Existing run records written before this change have no `postproc_hash` and no `podcast_outputs`. The dedup check treats missing `postproc_hash` as a mismatch (triggers post-processing re-run on the old output files if present, or full regeneration if not). Missing `podcast_outputs` is inferred from `artifacts[].output_files[0]` = final audio; raw audio is assumed absent (there was no retention mechanism before). No breaking change — old runs are either skipped (hash match, files present) or reprocessed fresh.
+
+**`.raw.mp3` cleanup policy (explicit — the existing state prune does NOT delete files):**
+
+The existing cleanup only prunes entries from `state.runs` older than `cleanup_days * 2`. It does NOT delete files. To prevent unbounded `.raw.mp3` accumulation:
+
+1. When a run record is pruned from `state.runs`, the cleanup workflow now ALSO deletes the `raw_audio` file referenced in that record's `podcast_outputs` (if it still exists). The `final_audio`, `vtt`, `transcript_md`, and `manifest` are preserved — those are the user's deliverables.
+2. An explicit `/kb-notebooklm cleanup --raw-audio` flag lets the user prune all retained raw files on demand without waiting for record pruning.
+3. If the user wants to force re-post-processing on a run whose raw audio has been deleted, the skill falls back to full regeneration and warns: "Raw audio for this episode has been pruned — re-running from NotebookLM."
+
+### 7. Sidecar manifest — extended fields
 
 The existing sidecar schema (written in step 7) gains three top-level fields:
 
@@ -406,11 +610,35 @@ transcript:
   speaker_count: 2                        # as detected by pyannote
 ```
 
-`kb-publish` does not need to act on these today — it just preserves them when merging the sidecar into `episodes.yaml`. Useful for debugging, future republishing flows, and eventually uploading transcripts to 小宇宙 if that ever becomes possible.
+**`kb-publish` preservation — requires an explicit update.** The current sidecar import in `kb-publish/SKILL.md` (Step 2b, around line 134) enumerates only the existing content manifest fields (`topic`, `depth`, `concepts_covered`, `open_threads`, `source_lessons`, `notebook_id`). The update path in Step 8b (around line 345) also only merges those fields. Without changes, the new sidecar fields would be dropped.
 
-### 7. `kb-init` setup additions
+**Changes required in `kb-publish/SKILL.md`:**
 
-`kb-init` is the one-time bootstrap skill. Extend the notebooklm venv setup step to install:
+1. Step 2b (sidecar import) — extend the "create new entry" and "merge fields" logic to also copy `intro_applied`, `hosts`, and the nested `transcript` object. Treat them as opaque pass-through fields; kb-publish doesn't interpret their values.
+2. Step 8b (registry update) — when writing the registry entry, preserve `intro_applied`, `hosts`, `transcript` from the prior state if they were populated by sidecar import.
+3. `episodes.yaml` schema documentation — add `intro_applied`, `hosts`, and `transcript` to the documented schema (they become optional fields on published entries).
+
+The registry entries now look like:
+
+```yaml
+episodes:
+  - id: 3
+    title: "EP3 | Flash Attention 和 KV Cache..."
+    # ... existing fields ...
+    intro_applied: true
+    hosts: ["瓜瓜龙", "海发菜"]
+    transcript:
+      vtt: podcast-attention-2026-04-20.vtt
+      markdown: podcast-attention-2026-04-20.transcript.md
+      applied: true
+      speaker_count: 2
+```
+
+### 8. `kb-init` setup additions
+
+`kb-init` is the one-time bootstrap skill. Changes:
+
+**A. Install new venv dependencies** into the notebooklm venv (both fresh setup AND existing venvs — detect that this is an upgrade by checking for missing packages, and install them silently):
 
 ```
 faster-whisper>=1.0.0
@@ -418,42 +646,104 @@ pyannote.audio>=3.1.0
 PyYAML
 ```
 
-(`PyYAML` is likely already in the venv via the existing notebooklm install.)
+(`PyYAML` is likely already in the venv via the existing notebooklm install; list it for safety.)
 
-Also prompt the user once:
+**B. Verify ffmpeg + ffprobe are on PATH.** If missing, tell the user:
+```
+brew install ffmpeg
+```
+and verify again. If still missing, disable intro-music by writing `intro_music: null` into the default config so the skill degrades gracefully instead of failing per-episode.
 
-> Transcription uses `pyannote/speaker-diarization-3.1`, which requires accepting the model license at https://huggingface.co/pyannote/speaker-diarization-3.1 and a HuggingFace token.
-> 1. Accept the model license at the URL above.
-> 2. Create a token at https://huggingface.co/settings/tokens
-> 3. Add `export HUGGINGFACE_TOKEN=hf_...` to your shell profile.
-> 4. Run `source ~/.zshrc` or restart your terminal.
+**C. Prompt for HuggingFace token and both pyannote model licenses.** Two models must be accepted because `speaker-diarization-3.1` depends on `segmentation-3.0`:
+
+> Transcription uses `pyannote/speaker-diarization-3.1`, which internally uses `pyannote/segmentation-3.0`. Both require license acceptance on HuggingFace, plus a token.
 >
-> Skip this step if you don't plan to use transcripts. (You can set `integrations.notebooklm.podcast.transcript.enabled: false` in kb.yaml.)
+> 1. Accept the license at https://huggingface.co/pyannote/segmentation-3.0
+> 2. Accept the license at https://huggingface.co/pyannote/speaker-diarization-3.1
+> 3. Create a token at https://huggingface.co/settings/tokens (read-scope is sufficient).
+> 4. Add `export HUGGINGFACE_TOKEN=hf_...` to your shell profile.
+> 5. Run `source ~/.zshrc` or restart your terminal.
+>
+> Skip this step if you don't plan to use transcripts.
 
-Record whether HF token is set. Write `transcript.enabled: <result>` into the default `kb.yaml` section so the user's setup decision is persisted.
+Verify: `test -n "$HUGGINGFACE_TOKEN"`. The script can't easily verify license acceptance until first model download, so run a dry-run download check as the final setup step (gracefully failing if both licenses aren't accepted and pointing the user back to the license URLs).
 
-**Note on cache reuse:** `faster-whisper` large-v3 is already cached on this machine from VoxToriApp's downloads at `~/.cache/huggingface/hub/models--Systran--faster-whisper-large-v3`. `faster-whisper` auto-detects this via the standard HF cache path — no action needed. Do NOT override `HF_HOME` in this skill; let the cache be shared.
+**D. Persist the outcome in `kb.yaml`:**
 
-### 8. Workflow summary — what changes in the skill's steps
+```yaml
+integrations:
+  notebooklm:
+    podcast:
+      transcript:
+        enabled: <true if HF token present and both licenses accepted, else false>
+        model: "large-v3"
+        device: "auto"
+        language: "zh"
+      # intro_music omitted if ffmpeg unavailable; left as commented-out placeholder otherwise
+      hosts: ["瓜瓜龙", "海发菜"]
+      extra_host_names: []
+      intro_music_length_seconds: 12
+      intro_crossfade_seconds: 3
+```
+
+**Rationale for `transcript.enabled` at setup time:** Setting `enabled: true` when the token/licenses are missing would produce per-episode error logs. Let setup gate this once, and let the user flip it to `true` later when they complete the HF setup.
+
+**Note on cache reuse:** `faster-whisper` large-v3 is already cached on this machine from VoxToriApp's downloads at `~/.cache/huggingface/hub/models--Systran--faster-whisper-large-v3`. `faster-whisper` auto-detects this via the standard HF cache path — no action needed. Do NOT override `HF_HOME` in this skill; let the cache be shared with any other whisper-using tools.
+
+### 9. Workflow summary — what changes in the skill's steps
 
 | Step | Current behavior | New behavior |
 |---|---|---|
-| 6i Generate audio | Reads prompt, substitutes `{series_context}` + `{lesson_list}` | Also substitutes `{hosts}`, `{host0}`, `{host1}` |
-| 6k Background agent | Wait + download MP3 | Wait + download (`.raw.mp3`) + assemble (`.mp3`) + transcribe (`.vtt`, `.transcript.md`) |
-| 7 On agent success | Write sidecar with content manifest fields | Also write `intro_applied`, `hosts`, `transcript.*` fields |
+| 6a' (new) | — | Render prompt (host pool + series bible + lesson list) into `rendered_prompt` BEFORE hashing |
+| 6b' Hash compute | `params_hash` over format/length/language/instruction | `params_hash` over sha256(rendered_prompt) + host pool; new `postproc_hash` for intro + transcript settings |
+| 6c Dedup check | Matches on `workflow + sources_hash + params_hash` | Additionally inspects `postproc_hash` and `podcast_outputs`; if only post-processing settings changed and raw audio retained, re-run post-processing only |
+| 6i Generate audio | Reads + renders prompt inline | Uses the already-rendered prompt from 6a' |
+| 6k Background agent | Wait + download MP3 | Wait + download (`.raw.mp3`) + assemble (`.mp3`) + transcribe raw audio using the actual VTT offset from assembly outcome (`.vtt`, `.transcript.md`) |
+| 7 On agent success | Write sidecar with content manifest fields | Also write `intro_applied`, `hosts`, `transcript.*` fields; store `postproc_hash` + structured `podcast_outputs` in run record |
+| Cleanup workflow | Prunes `runs` entries | Also deletes the `raw_audio` file referenced in pruned entries; new `--raw-audio` subflag |
 
 ## Testing & Verification
 
-The project has no automated test suite. Verification is procedural:
+The project has no automated test suite at the repo level, but the two new Python scripts are substantial enough to warrant colocated unit tests. Add a `tests/` directory under `plugins/kb/skills/kb-notebooklm/scripts/` with:
+
+**Unit tests (pytest, no network, no models required):**
+
+1. `test_assemble_audio.py`:
+   - Preflight math: requested 12s+3s on 12s file → effective 12s+3s (no clamp).
+   - Preflight math: requested 12s+3s on 5s file → effective 5s + min(3, 4.5)=3s crossfade.
+   - Preflight math: requested 12s+3s on 1s file → skip entirely.
+   - Preflight math: requested 3s+2s on 3s file → effective 3s + 2s (exact).
+   - ffmpeg command-building: verifies the constructed argv matches expected template.
+   - JSON output shape on success and each failure mode.
+2. `test_transcribe_audio.py`:
+   - Timestamp offset formatting: 0.24s + 9s offset → `00:00:09.240`; 65.5s + 9s → `00:01:14.500`; 3600.1s + 9s → `01:00:09.100`.
+   - VTT escaping: text containing `<`, `>`, `&` is properly escaped in cue body.
+   - VTT voice tag escaping for host names that contain special characters.
+   - Markdown paragraph merging: consecutive same-speaker segments are merged with a space; paragraph breaks inserted on speaker change.
+   - Diarization label mapping: given synthetic whisper segments + synthetic diarization turns, verify first-appearance ordering picks `host_pool[0]` for the earliest speaker.
+   - Whisper-segment splitting: given a single whisper segment whose words span two diarization turns, verify the output contains two sub-segments with the correct speaker assignments at the diarization boundary.
+   - VTT offset sanity: invoking with `--vtt-offset-seconds 0` produces cues starting near 0; invoking with offset 9.0 produces cues starting near 9.0.
+   - Self-intro swap: given a scenario where `host_pool[0]`'s first line mentions `host_pool[1]` but not itself, verify swap triggers and logs a warning.
+   - Title derivation when `--title` omitted: `podcast-kv-cache-2026-04-20.raw.mp3` → `全栈AI — kv-cache (2026-04-20)`.
+   - JSON output shape on success, missing HF token, model-download failure.
+3. `test_params_hash.py` (if the hashing logic is implemented in a shared Python helper):
+   - Verify hash changes when host pool changes.
+   - Verify hash changes when prompt text changes.
+   - Verify `postproc_hash` changes when intro config changes, but `params_hash` does not.
+
+**Procedural end-to-end verification (by the human):**
 
 1. **Prompt-only smoke test** — set `intro_music: null` and `transcript.enabled: false`, run `/kb-notebooklm podcast`. Listen to output: hosts introduce themselves as 瓜瓜龙 and 海发菜, brand is 全栈AI, no music intro, no transcript files.
-2. **Assembly test** — run `assemble_audio.py` standalone on an existing raw MP3 + test intro clip. Verify duration is approximately `intro_length + podcast_length - crossfade`, listen to the crossfade boundary.
-3. **Assembly edge case** — run `assemble_audio.py` with a 5s intro when config asks for 12s + 3s. Verify it clamps, warns, and still produces a valid output.
-4. **Transcription test** — run `transcribe_audio.py` on an assembled MP3 with `--hosts '["瓜瓜龙","海发菜"]'`. Verify the first two turns are labeled 瓜瓜龙 and 海发菜 in the order they appear. Open the `.vtt` in VLC against the MP3 and verify alignment.
-5. **Transcription degradation** — unset `HUGGINGFACE_TOKEN`, re-run. Verify script exits cleanly with an error code and the skill produces a working episode MP3 with `transcript.applied: false` in the sidecar.
-6. **End-to-end** — full podcast run with all three features enabled. Inspect final MP3, `.vtt`, `.transcript.md`, and sidecar manifest. Run `/kb-publish` on the output and verify sidecar fields are preserved in `episodes.yaml`.
-7. **Graceful degradation** — remove `intro_music` from kb.yaml, re-run full workflow. Verify MP3 is produced without music intro and no errors.
-8. **Backwards compatibility** — run the workflow on a project without the new config keys present. Verify it falls back to all defaults (default hosts, no intro music, transcript enabled if HF token present).
+2. **Assembly boundary** — run full workflow with real intro music. Use `ffprobe` on the final MP3 to verify duration ≈ `effective_intro_length + raw_duration - effective_crossfade`. Listen to the crossfade region.
+3. **Transcription alignment** — open `.vtt` in VLC against the final MP3. First dialogue cue should appear around the `effective_intro_length - effective_crossfade` mark.
+4. **Transcription degradation** — unset `HUGGINGFACE_TOKEN`, re-run. Verify script exits cleanly and skill produces a working MP3 with `transcript.applied: false` in the sidecar.
+5. **Re-post-process without regeneration** — run once successfully, change `intro_music_length_seconds` in kb.yaml, re-run. Verify NotebookLM is NOT called again (check notebook creation log), but `postproc_hash` mismatch triggers re-assembly using the retained `.raw.mp3`.
+6. **End-to-end publish** — full podcast run with all three features enabled, then run `/kb-publish` on the output. Inspect `episodes.yaml` and verify `intro_applied`, `hosts`, `transcript.*` fields are preserved in the published entry.
+7. **Graceful degradation** — remove `intro_music` from kb.yaml, re-run full workflow. Verify MP3 is produced without music intro (raw promoted to final) and no errors.
+8. **Backwards compatibility** — run the workflow on a pre-existing project without the new config keys. Verify it falls back to all defaults: default hosts, no intro music, transcript auto-disabled if HF token not present at setup time.
+9. **Rerun after brand fix** — on a project with pre-change runs in state, verify re-running the workflow detects the `params_hash` change (new prompt) and regenerates rather than skipping.
+10. **Assembly-failure VTT correctness** — configure an intro but point it at a broken file so `assemble_audio.py` fails. Verify: raw is promoted to final (`cp`), `intro_applied: false`, and the VTT cues start near 00:00:00 (offset=0), NOT at 9s.
+11. **Rerun after transcription fix** — configure transcription but run once with `HUGGINGFACE_TOKEN` unset (transcript_applied=false). Set the token and re-run. Verify `postproc_complete` predicate detects the incomplete state and re-runs transcription only (no NotebookLM regeneration), using the retained raw audio.
 
 ## Open Questions
 
