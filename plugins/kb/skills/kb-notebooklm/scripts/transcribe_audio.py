@@ -278,10 +278,22 @@ def transcribe_with_whisper(
 
 
 def diarize_with_pyannote(audio_path: str, *, hf_token: str) -> list[dict[str, Any]]:
-    """Run pyannote speaker-diarization-3.1 and return turns."""
+    """Run pyannote speaker-diarization-3.1 and return turns.
+
+    pyannote.audio 3.x uses `use_auth_token`; 4.x renamed it to `token`.
+    Try the modern kwarg first, fall back for backward compat.
+    """
     from pyannote.audio import Pipeline  # type: ignore
 
-    pipeline = Pipeline.from_pretrained("pyannote/speaker-diarization-3.1", use_auth_token=hf_token)
+    try:
+        pipeline = Pipeline.from_pretrained(
+            "pyannote/speaker-diarization-3.1", token=hf_token
+        )
+    except TypeError:
+        # Older pyannote (3.x) — use legacy kwarg.
+        pipeline = Pipeline.from_pretrained(
+            "pyannote/speaker-diarization-3.1", use_auth_token=hf_token
+        )
     diarization = pipeline(audio_path, num_speakers=2)
     return [
         {"start": float(turn.start), "end": float(turn.end), "speaker": str(label)}
