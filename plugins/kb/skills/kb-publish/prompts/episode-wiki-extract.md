@@ -28,7 +28,7 @@ Produce exactly ONE JSON object with these fields:
 
 - `summary` (string): 1-2 paragraph elevator pitch of what this episode actually taught.
 - `concepts` (array): each entry describes one concept taught in the episode with fields:
-  - `slug` (string): vault-relative wiki slug WITH the `wiki/` prefix, NO `.md` extension. Must match an existing concept catalog entry when possible; otherwise propose a new slug following the catalog's naming convention.
+  - `slug` (string): vault-relative wiki slug WITH the `wiki/` prefix, NO `.md` extension. Must match an existing concept catalog entry when possible; otherwise propose a new slug following the catalog's naming convention. **Slug MUST be lowercase ASCII with hyphens only** — no spaces, no uppercase, no punctuation other than `-`, `_`, `.`, `/`. Correct: `wiki/gpu/compute-capability`. Wrong: `wiki/gpu/Compute Capability`, `wiki/gpu/NVIDIA_Compute_Capability`.
   - `depth_this_episode`: one of `"mentioned"`, `"explained"`, `"deep-dive"`.
   - `what` (string): ONE-SENTENCE definition as taught in this episode.
   - `why_it_matters` (string): ONE-SENTENCE reason this concept matters.

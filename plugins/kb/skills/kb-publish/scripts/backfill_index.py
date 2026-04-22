@@ -165,12 +165,19 @@ def _make_haiku_call(model: str | None = None) -> Callable[[str], str]:
         client = Anthropic()
 
     def _call(prompt: str) -> str:
-        resp = client.messages.create(
+        # Stream the response: avoids the SDK's non-streaming "estimated >10 min"
+        # timeout check, and 16k output tokens is plenty for 15-40 concepts with
+        # multi-line key_points (each concept ~300-500 tokens → 15-40 concepts
+        # fit comfortably inside 16k).
+        chunks: list[str] = []
+        with client.messages.stream(
             model=model,
-            max_tokens=32000,  # Large enough for 15-40 concepts × multi-line key_points
+            max_tokens=16000,
             messages=[{"role": "user", "content": prompt}],
-        )
-        return "".join(b.text for b in resp.content if hasattr(b, "text"))
+        ) as stream:
+            for text in stream.text_stream:
+                chunks.append(text)
+        return "".join(chunks)
 
     return _call
 

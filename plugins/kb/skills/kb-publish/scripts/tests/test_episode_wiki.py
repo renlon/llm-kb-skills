@@ -1034,6 +1034,45 @@ def test_validate_extraction_shape_rejects_invalid_depth():
         })
 
 
+def test_normalize_haiku_slug_lowercases_and_hyphenates():
+    from episode_wiki import _normalize_haiku_slug
+    assert _normalize_haiku_slug("wiki/gpu/NVIDIA Compute Capability") == "wiki/gpu/nvidia-compute-capability"
+
+
+def test_normalize_haiku_slug_preserves_already_canonical():
+    from episode_wiki import _normalize_haiku_slug
+    assert _normalize_haiku_slug("wiki/quantization/k-quants") == "wiki/quantization/k-quants"
+
+
+def test_normalize_haiku_slug_collapses_runs_of_punctuation():
+    from episode_wiki import _normalize_haiku_slug
+    assert _normalize_haiku_slug("wiki/ai/GPT-4 & Claude  Opus!") == "wiki/ai/gpt-4-claude-opus"
+
+
+def test_normalize_extraction_slugs_handles_open_threads_and_series():
+    from episode_wiki import _normalize_extraction_slugs
+    data = {
+        "summary": "s",
+        "concepts": [
+            {"slug": "wiki/GPU/Compute Capability", "depth_this_episode": "explained",
+             "what": "w", "why_it_matters": "y", "key_points": ["k"]}
+        ],
+        "open_threads": [
+            {"slug": "wiki/Formats/GGUF File Format", "note": "n", "existed_before": False}
+        ],
+        "series_links": {
+            "builds_on": ["wiki/episodes/EP-01 GPU Computing"],
+            "followup_candidates": ["freeform prose is fine here"]
+        }
+    }
+    out = _normalize_extraction_slugs(data)
+    assert out["concepts"][0]["slug"] == "wiki/gpu/compute-capability"
+    assert out["open_threads"][0]["slug"] == "wiki/formats/gguf-file-format"
+    assert out["series_links"]["builds_on"][0] == "wiki/episodes/ep-01-gpu-computing"
+    # followup_candidates untouched
+    assert out["series_links"]["followup_candidates"] == ["freeform prose is fine here"]
+
+
 # ---------------------------------------------------------------------------
 # Task 6: judge_candidate_episode — Layer 3 dedup judge
 # ---------------------------------------------------------------------------

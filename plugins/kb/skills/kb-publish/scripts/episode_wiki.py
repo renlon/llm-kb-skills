@@ -871,6 +871,62 @@ def _validate_extraction_shape(data: dict) -> None:
             raise TransactionAbortedError(f"invalid depth_this_episode: {c['depth_this_episode']!r}")
 
 
+def _normalize_haiku_slug(slug: str) -> str:
+    """Best-effort normalize a Haiku-proposed slug to our canonical form.
+
+    Haiku sometimes emits slugs with uppercase letters, spaces, or mixed
+    punctuation ("wiki/gpu/NVIDIA Compute Capability"). Normalize to
+    "wiki/gpu/nvidia-compute-capability" so validate_slug() accepts them.
+
+    Preserves the 'wiki/' prefix and path-component structure (slashes between
+    components). Within each component: lowercase, replace any non-alphanumeric
+    run with a single hyphen, trim edges.
+    """
+    if not isinstance(slug, str) or not slug:
+        return slug  # let validate_slug() raise the clearer error
+    if slug.startswith("wiki/"):
+        prefix = "wiki/"
+        rest = slug[len(prefix):]
+    else:
+        prefix = ""
+        rest = slug
+    components = rest.split("/")
+    normalized = []
+    for comp in components:
+        n = re.sub(r"[^a-z0-9]+", "-", comp.lower()).strip("-")
+        if n:
+            normalized.append(n)
+    return prefix + "/".join(normalized) if normalized else slug
+
+
+def _normalize_extraction_slugs(data: dict) -> dict:
+    """Normalize every slug in the extraction dict before strict validation."""
+    data = dict(data)
+    new_concepts = []
+    for c in data.get("concepts", []) or []:
+        c = dict(c)
+        if "slug" in c:
+            c["slug"] = _normalize_haiku_slug(c["slug"])
+        new_concepts.append(c)
+    data["concepts"] = new_concepts
+    new_threads = []
+    for t in data.get("open_threads", []) or []:
+        t = dict(t)
+        if t.get("slug"):
+            t["slug"] = _normalize_haiku_slug(t["slug"])
+        new_threads.append(t)
+    data["open_threads"] = new_threads
+    # Also normalize series_links
+    sl = data.get("series_links") or {}
+    if isinstance(sl, dict):
+        sl = dict(sl)
+        sl["builds_on"] = [_normalize_haiku_slug(s) if isinstance(s, str) else s
+                           for s in (sl.get("builds_on") or [])]
+        # followup_candidates is free-form prose, not slugs — leave alone
+        data["series_links"] = sl
+    return data
+
+
 def _recompute_existed_before(concepts: list[dict], wiki_dir: Path) -> list[dict]:
     """Override Haiku's existed_before claim with the actual filesystem state.
 
@@ -950,6 +1006,10 @@ def orchestrate_episode_index(
         candidate = candidate.strip()
         try:
             parsed = json.loads(candidate)
+            # Normalize slugs BEFORE shape validation so Haiku's casing / spacing
+            # quirks (e.g. "wiki/gpu/NVIDIA Compute Capability") don't abort
+            # indexing before we get a chance to canonicalize.
+            parsed = _normalize_extraction_slugs(parsed)
             _validate_extraction_shape(parsed)
             data = parsed
             break
