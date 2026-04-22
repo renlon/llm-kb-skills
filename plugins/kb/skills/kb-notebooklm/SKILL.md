@@ -432,6 +432,73 @@ Each workflow follows a common pattern: select source files from the KB, filter 
 
 4. **Sort:** Sort by mtime ascending (oldest first).
 
+4b. **Confidentiality filter and sanitization (MANDATORY — never bypass):**
+
+   **Do NOT upload any lesson that contains employer-internal or otherwise confidential content to NotebookLM.** Produce sanitized generic variants first and upload those instead. This is the primary defense against leaking internal content via a public podcast feed.
+
+   **4b.1 — Scan each candidate lesson for internal-confidential markers:**
+   - Employer/product/service names (real names and internal code names, e.g., project names, component names, geological/astronomical/military-style code words)
+   - Teammate names, usernames, review/ticket IDs (e.g., `CR-\d+`, approver handles, `@alias`)
+   - Internal architecture specifics (org-specific topologies, deployment choices, file layouts, internal tooling)
+   - Filename prefixes that consistently mark internal content (e.g., `<CompanyCode>_*`, `<InternalProduct>_*`)
+
+   Use Grep liberally and conservatively — err on the side of flagging. When in doubt, flag and ask the user.
+
+   **4b.2 — Classify each lesson into one of three buckets:**
+   - **`generic`** — no internal markers; safe to upload as-is.
+   - **`sanitizable`** — contains internal markers but has sufficient generic teaching content to be extracted. Produce a sanitized variant (see 4b.3).
+   - **`skip`** — fully internal; no general teaching value after sanitization. Exclude entirely and report to the user.
+
+   **4b.3 — Sanitize `sanitizable` lessons:**
+
+   For each `sanitizable` lesson, write a sanitized variant to `config.output_path/sanitized/<basename-without-ext>.sanitized.md`. The sanitized file MUST:
+   - Remove all employer/product/service/code names. Replace with generic equivalents (e.g., "an LLM serving system", "an event-driven microservice", "a monorepo") or omit entirely.
+   - Remove all teammate names, handles, review/ticket IDs, session-archive metadata.
+   - Remove all internal architecture specifics and proprietary implementation choices.
+   - Preserve the universal AI/ML teaching content, concepts, tradeoffs, and any publicly known frameworks/libraries discussed.
+   - Never invent content to fill gaps — if sanitization leaves holes, accept a shorter lesson.
+
+   Dispatch a Sonnet subagent per `sanitizable` lesson to do this rewrite. The subagent returns the sanitized markdown; the main conversation writes it to disk.
+
+   If the sanitized variant ends up too thin to be worth teaching (e.g., < 500 chars of real content), reclassify to `skip`.
+
+   **4b.4 — Present the classification to the user:**
+
+   ```
+   Confidentiality filter results:
+
+   ✅ Generic (safe to upload, M lessons):
+   - <lesson 1>
+   - <lesson 2>
+   ...
+
+   ✏️  Sanitized (will upload the sanitized variant, K lessons):
+   - <lesson A>  → output/sanitized/<A>.sanitized.md
+   - <lesson B>  → output/sanitized/<B>.sanitized.md
+   ...
+
+   ⛔ Skipped (internal-only, no general teaching value, J lessons):
+   - <lesson X>  (reason: fully internal systems doc)
+   - <lesson Y>  (reason: session archive with only CR metadata)
+   ...
+
+   Please review the sanitized variants before proceeding, or ask me to exclude
+   any lessons you're unsure about.
+   ```
+
+   Wait for user confirmation before proceeding. User may request additional lessons be moved to `skip`, request re-sanitization of a variant, or approve as-is.
+
+   **4b.5 — From here onward, "selected lessons" refers to:**
+   - All `generic` lessons (using their original paths)
+   - All `sanitized` lesson variants (using their `.sanitized.md` paths)
+   - Zero `skip` lessons
+
+   The dedup `sources_hash` (step 6b) hashes the paths and mtimes of the **actually-uploaded files** (generic + sanitized), not the original lesson paths. This means sanitizing an additional lesson next run busts the hash correctly. The sidecar manifest's `source_lessons` field stores the original basenames for audit, plus a parallel `uploaded_sources` field listing the actual paths sent to NotebookLM.
+
+   **4b.6 — Rule for the sanitization itself (belt-and-suspenders):**
+
+   The podcast generation prompt (`prompts/podcast-tutor.md`) already contains an instruction that proprietary systems must be referenced in generic terms only. That is a secondary defense. The PRIMARY defense is ensuring no raw internal content ever reaches NotebookLM in the first place.
+
 5. **Topic grouping — one main topic per episode:** Each episode MUST focus on one coherent main topic. Group lessons so that every lesson in an episode is directly related to the same theme. This produces focused, deep teaching episodes rather than shallow multi-topic surveys.
 
    **Grouping algorithm:**

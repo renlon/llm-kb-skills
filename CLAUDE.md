@@ -99,6 +99,28 @@ Before every `git push` to remote:
 - If raw source material contains personal information or credentials, redact them before compiling into the wiki.
 - Never log or echo secrets in bash commands or subagent prompts.
 
+### Internal-confidential lessons — NEVER upload to NotebookLM or any public-facing service
+
+Lessons in the user's KB can mix **personal learning notes** (fine for broadcast) with **employer/internal lessons** (strictly not for broadcast). Internal-confidential content includes:
+- Employer or internal product/service names (real or code-named)
+- Teammate names, usernames, review/ticket IDs (e.g., `CR-*`, approver handles)
+- Internal architectural decisions, deployment topologies, proprietary IP
+- Internal tooling names and their implementation details
+
+**Hard rules — all workflows that upload lesson content externally (kb-notebooklm, any future public-facing integration):**
+
+1. **Detect-and-sanitize step is MANDATORY before any upload.** Scan every candidate lesson for internal-confidential markers. If any are found, produce a **sanitized generic variant** that preserves the universal AI/ML teaching content but strips:
+   - All employer/product/service/code names (replace with generic equivalents or omit)
+   - All teammate names, handles, review/ticket IDs
+   - All internal architecture specifics (topologies, deployment choices, file layouts, etc.)
+2. **Upload only the sanitized variant.** The raw lesson stays local.
+3. **If sanitization would leave nothing of general value, skip the lesson entirely** and report to the user. Do NOT upload a watered-down version that still contains internal details in subtle places.
+4. **Defense-in-depth:** the audio-generation prompt must also instruct the model to speak only in generic terms about any proprietary systems, but the primary defense is never sending such lessons to NotebookLM in the first place.
+
+The podcast audience is the general AI/ML community — they should never hear anything about the user's employer, its products, or internal implementations. Leaking internal content via a public podcast is a legal and career risk.
+
+This rule applies to ALL lesson-upload workflows, not just podcasts.
+
 ## Documentation
 
 - `docs/CODE_WALKTHROUGH.md` -- Guided tour of the codebase for new contributors.

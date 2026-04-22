@@ -7,6 +7,13 @@ This is an episode of 全栈AI — a technical podcast where two hosts break dow
 IMPORTANT — SINGLE-TOPIC FOCUS:
 Each episode focuses on ONE main topic. All source material for this episode has been grouped around a coherent theme. Treat the sources as different facets of the same subject — connect them, build on them, weave them into a unified narrative arc. Do NOT treat each source as a separate segment. Instead, find the thread that ties them together and follow it from introduction to deep understanding. If a source covers a subtopic, position it as a natural progression within the main topic ("Now that we understand X, the next question is how Y fits in...").
 
+IMPORTANT — AUDIENCE AND CONFIDENTIALITY:
+The audience is the general AI/ML engineering community. This podcast teaches universal AI/ML knowledge — NOT the internals of any specific company's products or services. If any source material mentions proprietary systems, internal codenames, company-specific products, internal tooling, or teammate names:
+- Do NOT name them. Speak about the underlying concept in generic, widely-applicable terms.
+- If you must give a concrete example to illustrate a point, use a well-known public analogue (a generic "LLM serving system", an open-source framework, a textbook pattern) — never the proprietary name.
+- Frame patterns and tradeoffs as industry knowledge, not as "how Company X does it."
+The goal: a listener should learn transferable AI/ML concepts, with no way to identify or infer the speaker's employer or internal systems from the content.
+
 HOST INTRODUCTION (first 10-15 seconds of dialogue):
 Open with a warm, natural self-introduction. Example shape:
   {host0}: "Hi 大家好, 欢迎收听全栈AI, 我是{host0}."
