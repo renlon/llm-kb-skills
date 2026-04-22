@@ -406,3 +406,179 @@ def test_render_episode_wiki_snapshot():
     body = output[end + len("\n---\n"):]
     assert "EP3 | 量化" in body
     assert "A deep dive into quantization." in body
+
+
+# ---------------------------------------------------------------------------
+# I/O helpers: scan_episode_wiki, concept_catalog, concepts_covered_by_episodes
+# ---------------------------------------------------------------------------
+
+import logging
+import sys
+from pathlib import Path
+
+import pytest
+
+import episode_wiki as E
+from episode_wiki import (
+    EpisodeParseError,
+    IndexedEpisode,
+    scan_episode_wiki,
+    concept_catalog,
+    concepts_covered_by_episodes,
+)
+# conftest._minimal_episode_article is available via fixtures; also importable directly.
+# Ensure the tests directory is on sys.path so conftest is importable as a module.
+_TESTS_DIR = str(Path(__file__).resolve().parent)
+if _TESTS_DIR not in sys.path:
+    sys.path.insert(0, _TESTS_DIR)
+from conftest import _minimal_episode_article
+
+
+# scan_episode_wiki tests
+
+def test_scan_lenient_skips_malformed_and_returns_valid(wiki_fixture, caplog):
+    # Add a malformed episode alongside the good one
+    (wiki_fixture / "episodes" / "ep-04-broken.md").write_text(
+        "---\nepisode_id: not-a-number\n---\n", encoding="utf-8"
+    )
+    with caplog.at_level(logging.WARNING):
+        eps = scan_episode_wiki(wiki_fixture, strict=False)
+    assert len(eps) == 1
+    assert eps[0].episode_id == 3
+    assert any("ep-04" in rec.message or "broken" in rec.message for rec in caplog.records)
+
+
+def test_scan_strict_raises_on_malformed(wiki_fixture):
+    (wiki_fixture / "episodes" / "ep-04-broken.md").write_text(
+        "---\nepisode_id: not-a-number\n---\n", encoding="utf-8"
+    )
+    with pytest.raises(EpisodeParseError):
+        scan_episode_wiki(wiki_fixture, strict=True)
+
+
+def test_scan_sorts_by_episode_id(wiki_fixture):
+    (wiki_fixture / "episodes" / "ep-01-foo.md").write_text(_minimal_episode_article(1), encoding="utf-8")
+    (wiki_fixture / "episodes" / "ep-07-bar.md").write_text(_minimal_episode_article(7), encoding="utf-8")
+    eps = scan_episode_wiki(wiki_fixture, strict=False)
+    assert [e.episode_id for e in eps] == [1, 3, 7]
+
+
+def test_scan_returns_empty_list_when_episodes_dir_missing(tmp_path):
+    wiki = tmp_path / "wiki"
+    wiki.mkdir()  # no episodes subdir
+    assert scan_episode_wiki(wiki) == []
+
+
+def test_scan_populates_indexed_concepts_from_index_block(wiki_fixture):
+    eps = scan_episode_wiki(wiki_fixture, strict=False)
+    assert len(eps[0].concepts) == 1
+    c = eps[0].concepts[0]
+    assert c.slug == "wiki/quantization/k-quants"
+    assert c.depth_this_episode == "deep-dive"
+    assert c.key_points == ["Groups into blocks"]
+
+
+# concept_catalog tests
+
+def test_catalog_excludes_episodes_always(wiki_fixture):
+    cat = concept_catalog(wiki_fixture, include_stubs=True)
+    all_slugs = {e["slug"] for entries in cat.values() for e in entries}
+    assert not any(s.startswith("wiki/episodes/") for s in all_slugs)
+
+
+def test_catalog_includes_stubs_by_default(wiki_fixture):
+    cat = concept_catalog(wiki_fixture)  # include_stubs=True default
+    all_slugs = {e["slug"] for entries in cat.values() for e in entries}
+    assert "wiki/quantization/k-quants" in all_slugs
+
+
+def test_catalog_marks_stubs(wiki_fixture):
+    cat = concept_catalog(wiki_fixture, include_stubs=True)
+    k_entries = [e for entries in cat.values() for e in entries if e["slug"] == "wiki/quantization/k-quants"]
+    assert k_entries[0]["is_stub"] is True
+
+
+def test_catalog_marks_non_stubs(wiki_fixture):
+    cat = concept_catalog(wiki_fixture, include_stubs=True)
+    fa_entries = [e for entries in cat.values() for e in entries if e["slug"] == "wiki/attention/flash-attention"]
+    assert fa_entries[0]["is_stub"] is False
+
+
+def test_catalog_excludes_stubs_when_include_false(wiki_fixture):
+    cat = concept_catalog(wiki_fixture, include_stubs=False)
+    all_slugs = {e["slug"] for entries in cat.values() for e in entries}
+    assert "wiki/quantization/k-quants" not in all_slugs
+    assert "wiki/attention/flash-attention" in all_slugs
+
+
+def test_catalog_groups_by_top_level_category(wiki_fixture):
+    cat = concept_catalog(wiki_fixture, include_stubs=True)
+    assert "attention" in cat
+    assert "quantization" in cat
+
+
+def test_catalog_ignores_top_level_files_like_readme(wiki_fixture):
+    # wiki/README.md exists from the fixture — should not appear in any category
+    cat = concept_catalog(wiki_fixture)
+    all_slugs = {e["slug"] for entries in cat.values() for e in entries}
+    assert not any("README" in s for s in all_slugs)
+
+
+# concepts_covered_by_episodes tests
+
+def test_coverage_aggregation_single_episode(wiki_fixture):
+    eps = scan_episode_wiki(wiki_fixture)
+    coverage = concepts_covered_by_episodes(eps)
+    assert "wiki/quantization/k-quants" in coverage
+    hits = coverage["wiki/quantization/k-quants"]
+    assert len(hits) == 1
+    assert hits[0]["ep_id"] == 3
+    assert hits[0]["depth"] == "deep-dive"
+
+
+def test_coverage_aggregation_multiple_episodes_same_concept(wiki_fixture):
+    # Add a second episode that also covers k-quants at a different depth
+    ep5 = _minimal_episode_article(5).replace(
+        "deep-dive", "explained", 1  # change episode depth but NOT the concept — manual tweak below
+    )
+    # Build a custom article for EP5 with concept at "explained"
+    (wiki_fixture / "episodes" / "ep-05-followup.md").write_text(
+        """---
+title: "EP5 | Follow-up"
+episode_id: 5
+audio_file: a.mp3
+transcript_file: a.transcript.md
+date: 2026-04-22
+depth: explained
+tags: [episode]
+aliases: []
+source_lessons: []
+index:
+  schema_version: 1
+  summary: "Follow-up."
+  concepts:
+    - slug: wiki/quantization/k-quants
+      depth_this_episode: explained
+      depth_delta_vs_past: lighter
+      prior_episode_ref: 3
+      what: "Brief recap."
+      why_it_matters: "Context."
+      key_points: []
+      covered_at_sec: 5.0
+      existed_before: true
+  open_threads: []
+  series_links:
+    builds_on: []
+    followup_candidates: []
+---
+
+# EP5
+""",
+        encoding="utf-8",
+    )
+    eps = scan_episode_wiki(wiki_fixture)
+    coverage = concepts_covered_by_episodes(eps)
+    hits = coverage["wiki/quantization/k-quants"]
+    assert len(hits) == 2
+    ep_ids = {h["ep_id"] for h in hits}
+    assert ep_ids == {3, 5}

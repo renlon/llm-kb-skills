@@ -506,3 +506,151 @@ def _render_body(
         parts.append("\n")
 
     return "".join(parts)
+
+
+# ---------------------------------------------------------------------------
+# I/O helpers (Task 3) — filesystem reads only; no network, no Haiku
+# ---------------------------------------------------------------------------
+
+import logging
+
+log = logging.getLogger(__name__)
+
+
+def scan_episode_wiki(
+    wiki_dir: Path,
+    strict: bool = False,
+) -> list[IndexedEpisode]:
+    """Parse all wiki/episodes/*.md files into structured records, sorted by episode_id.
+
+    strict=False (default): malformed frontmatter or missing `index` block logs
+    a warning and skips the file. Used by dedup at podcast-generation time.
+
+    strict=True: any parse failure raises EpisodeParseError. Used by reindex
+    staging smoke-parse.
+    """
+    ep_dir = wiki_dir / "episodes"
+    if not ep_dir.is_dir():
+        return []
+    out: list[IndexedEpisode] = []
+    for fp in sorted(ep_dir.glob("*.md")):
+        try:
+            ep = _parse_episode_article(fp)
+            out.append(ep)
+        except Exception as e:
+            if strict:
+                raise EpisodeParseError(f"{fp.name}: {e}") from e
+            log.warning("Skipping malformed episode %s: %s", fp.name, e)
+    out.sort(key=lambda e: e.episode_id)
+    return out
+
+
+def _parse_episode_article(path: Path) -> IndexedEpisode:
+    text = path.read_text(encoding="utf-8")
+    if not text.startswith("---\n"):
+        raise EpisodeParseError("no frontmatter")
+    end = text.find("\n---\n", 4)
+    if end < 0:
+        raise EpisodeParseError("unterminated frontmatter")
+    fm = yaml.safe_load(text[4:end])
+    if not isinstance(fm, dict):
+        raise EpisodeParseError("frontmatter not a dict")
+    ep_id = fm.get("episode_id")
+    if not isinstance(ep_id, int):
+        raise EpisodeParseError(f"episode_id not int: {ep_id!r}")
+    idx = fm.get("index") or {}
+    concepts = []
+    for c in idx.get("concepts", []) or []:
+        concepts.append(IndexedConcept(
+            slug=c.get("slug", ""),
+            depth_this_episode=c.get("depth_this_episode", "mentioned"),
+            depth_delta_vs_past=c.get("depth_delta_vs_past", "new"),
+            prior_episode_ref=c.get("prior_episode_ref"),
+            what=c.get("what", ""),
+            why_it_matters=c.get("why_it_matters", ""),
+            key_points=list(c.get("key_points") or []),
+            covered_at_sec=c.get("covered_at_sec"),
+        ))
+    threads = []
+    for t in idx.get("open_threads", []) or []:
+        threads.append(OpenThread(
+            slug=t.get("slug"),
+            note=t.get("note", ""),
+            existed_before=bool(t.get("existed_before", False)),
+        ))
+    sl = idx.get("series_links") or {}
+    return IndexedEpisode(
+        episode_id=ep_id,
+        title=fm.get("title", ""),
+        date=str(fm.get("date", "")),
+        depth=fm.get("depth", ""),
+        audio_file=fm.get("audio_file", ""),
+        transcript_file=fm.get("transcript_file"),
+        concepts=concepts,
+        open_threads=threads,
+        series_builds_on=list(sl.get("builds_on") or []),
+        series_followup_candidates=list(sl.get("followup_candidates") or []),
+    )
+
+
+def concept_catalog(
+    wiki_dir: Path,
+    include_stubs: bool = True,
+) -> dict[str, list[dict]]:
+    """{top-level-category: [{slug, title, tags, aliases, is_stub}, ...]} — for Haiku prompts.
+
+    Episode articles (wiki/episodes/**) are always excluded.
+    Stubs are included by default (flagged via is_stub=True), so Haiku can
+    canonicalize to them and avoid duplicate-stub proliferation.
+    """
+    out: dict[str, list[dict]] = {}
+    for fp in wiki_dir.rglob("*.md"):
+        rel = fp.relative_to(wiki_dir)
+        # Exclude episodes always
+        if rel.parts and rel.parts[0] == "episodes":
+            continue
+        # Top-level flat file (like README.md) — skip
+        if len(rel.parts) < 2:
+            continue
+        try:
+            text = fp.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        if not text.startswith("---\n"):
+            continue
+        end = text.find("\n---\n", 4)
+        if end < 0:
+            continue
+        try:
+            fm = yaml.safe_load(text[4:end]) or {}
+        except yaml.YAMLError:
+            continue
+        is_stub = fm.get("status") == "stub"
+        if is_stub and not include_stubs:
+            continue
+        slug = "wiki/" + str(rel.with_suffix("")).replace(os.sep, "/")
+        category = rel.parts[0]
+        out.setdefault(category, []).append({
+            "slug": slug,
+            "title": fm.get("title", ""),
+            "tags": list(fm.get("tags") or []),
+            "aliases": list(fm.get("aliases") or []),
+            "is_stub": is_stub,
+        })
+    return out
+
+
+def concepts_covered_by_episodes(
+    episodes: list[IndexedEpisode],
+) -> dict[str, list[dict]]:
+    """{slug: [{ep_id, depth, key_points, date}, ...]} — what each concept has been taught."""
+    out: dict[str, list[dict]] = {}
+    for ep in episodes:
+        for c in ep.concepts:
+            out.setdefault(c.slug, []).append({
+                "ep_id": ep.episode_id,
+                "depth": c.depth_this_episode,
+                "key_points": list(c.key_points),
+                "date": ep.date,
+            })
+    return out
