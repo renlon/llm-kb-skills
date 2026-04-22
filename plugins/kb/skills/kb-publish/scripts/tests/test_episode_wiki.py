@@ -1032,3 +1032,92 @@ def test_validate_extraction_shape_rejects_invalid_depth():
             ],
             "open_threads": [],
         })
+
+
+# ---------------------------------------------------------------------------
+# Task 6: judge_candidate_episode — Layer 3 dedup judge
+# ---------------------------------------------------------------------------
+
+from episode_wiki import DedupJudgement, judge_candidate_episode
+
+
+def test_judge_builds_prior_hits_per_candidate(tmp_path):
+    wiki = tmp_path / "wiki"
+    (wiki / "episodes").mkdir(parents=True)
+    from tests.conftest import _minimal_episode_article
+    (wiki / "episodes" / "ep-03-q.md").write_text(_minimal_episode_article(3), encoding="utf-8")
+
+    prompt_path = tmp_path / "p.md"
+    prompt_path.write_text("{candidates}|{prior_hits}|{open_threads}", encoding="utf-8")
+
+    seen = {}
+    def haiku(p):
+        seen["prompt"] = p
+        return json.dumps({
+            "per_concept": [
+                {"candidate": "k-quants", "verdict": "redundant_same_depth",
+                 "reasoning": "EP3 covered k-quants at deep-dive.",
+                 "recommended_framing": "Skip."},
+            ],
+            "episode_verdict": "reframe",
+            "framing_recommendation": "Angle.",
+        })
+
+    result = judge_candidate_episode(
+        wiki_dir=wiki,
+        candidate_concepts=["k-quants", "new-thing"],
+        haiku_call=haiku,
+        prompt_template_path=prompt_path,
+    )
+    assert isinstance(result, DedupJudgement)
+    assert len(result.per_concept) == 1
+    assert result.episode_verdict == "reframe"
+    # Verify prior_hits substituted in prompt — the k-quants concept in EP3's fixture is at slug wiki/quantization/k-quants
+    # The judge passes raw candidate names; resolve_concept_candidate is tried first, so "k-quants" (exact title) should resolve.
+    assert "k-quants" in seen["prompt"]
+
+
+def test_judge_returns_empty_prior_hits_for_novel_candidates(tmp_path):
+    wiki = tmp_path / "wiki"
+    (wiki / "episodes").mkdir(parents=True)
+    prompt_path = tmp_path / "p.md"
+    prompt_path.write_text("{candidates}|{prior_hits}|{open_threads}", encoding="utf-8")
+
+    def haiku(p):
+        return json.dumps({
+            "per_concept": [{"candidate": "novel", "verdict": "novel",
+                             "reasoning": "No prior.", "recommended_framing": "Proceed."}],
+            "episode_verdict": "proceed",
+            "framing_recommendation": "OK.",
+        })
+
+    result = judge_candidate_episode(
+        wiki_dir=wiki,
+        candidate_concepts=["novel"],
+        haiku_call=haiku,
+        prompt_template_path=prompt_path,
+    )
+    assert result.episode_verdict == "proceed"
+
+
+def test_judge_raises_when_haiku_json_malformed(tmp_path):
+    wiki = tmp_path / "wiki"
+    (wiki / "episodes").mkdir(parents=True)
+    prompt_path = tmp_path / "p.md"
+    prompt_path.write_text("{candidates}|{prior_hits}|{open_threads}", encoding="utf-8")
+
+    def bad(p):
+        return "not json"
+
+    with pytest.raises(json.JSONDecodeError):
+        judge_candidate_episode(
+            wiki_dir=wiki, candidate_concepts=["x"],
+            haiku_call=bad, prompt_template_path=prompt_path,
+        )
+
+
+def test_judge_requires_haiku_call_and_template(tmp_path):
+    wiki = tmp_path / "wiki"
+    (wiki / "episodes").mkdir(parents=True)
+    with pytest.raises(RuntimeError):
+        judge_candidate_episode(wiki_dir=wiki, candidate_concepts=["x"])

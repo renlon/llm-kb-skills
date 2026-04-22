@@ -975,3 +975,73 @@ def orchestrate_episode_index(
         tags=tags, aliases=aliases, source_lessons=source_lessons,
         extraction=data,
     )
+
+
+# ---------------------------------------------------------------------------
+# Task 6: Dedup judge — judge_candidate_episode (Haiku-injected callable)
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class DedupJudgement:
+    per_concept: list[dict]
+    episode_verdict: str
+    framing_recommendation: str
+
+
+def judge_candidate_episode(
+    wiki_dir: Path,
+    candidate_concepts: list[str],
+    open_threads_allow: list[str] | None = None,
+    haiku_call: Callable[[str], str] | None = None,
+    prompt_template_path: Path | None = None,
+) -> DedupJudgement:
+    """Layer 3 dedup judge. Pre-computes prior-coverage per candidate then
+    delegates verdict-per-candidate classification to Haiku.
+
+    Callers MUST inject haiku_call + prompt_template_path; this function
+    never binds the Anthropic SDK directly.
+    """
+    if haiku_call is None or prompt_template_path is None:
+        raise RuntimeError("haiku_call and prompt_template_path are required")
+
+    all_eps = scan_episode_wiki(wiki_dir, strict=False)
+    coverage = concepts_covered_by_episodes(all_eps)
+    catalog = concept_catalog(wiki_dir, include_stubs=True)
+
+    prior_hits: dict[str, list[dict]] = {}
+    for cand in candidate_concepts:
+        resolved = resolve_concept_candidate(cand, catalog) or cand
+        prior_hits[cand] = coverage.get(resolved, [])
+
+    # Open threads from the 5 most recent episodes
+    open_threads = []
+    for ep in sorted(all_eps, key=lambda e: e.episode_id)[-5:]:
+        for t in ep.open_threads:
+            open_threads.append({
+                "ep_id": ep.episode_id,
+                "note": t.note,
+                "slug": t.slug,
+            })
+
+    template = prompt_template_path.read_text(encoding="utf-8")
+    prompt = (template
+              .replace("{candidates}", yaml.safe_dump(candidate_concepts, allow_unicode=True))
+              .replace("{prior_hits}", yaml.safe_dump(prior_hits, allow_unicode=True))
+              .replace("{open_threads}", yaml.safe_dump(open_threads, allow_unicode=True)))
+
+    raw = haiku_call(prompt)
+    candidate = raw.strip()
+    if candidate.startswith("```"):
+        first_nl = candidate.find("\n")
+        candidate = candidate[first_nl + 1:] if first_nl >= 0 else candidate
+        if candidate.rstrip().endswith("```"):
+            candidate = candidate.rstrip()[:-3]
+    candidate = candidate.strip()
+    data = json.loads(candidate)  # raises JSONDecodeError if malformed — caller can decide to retry
+
+    return DedupJudgement(
+        per_concept=list(data.get("per_concept") or []),
+        episode_verdict=str(data.get("episode_verdict", "proceed")),
+        framing_recommendation=str(data.get("framing_recommendation", "")),
+    )
