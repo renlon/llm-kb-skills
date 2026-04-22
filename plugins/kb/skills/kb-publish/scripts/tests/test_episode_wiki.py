@@ -830,3 +830,205 @@ def test_staging_dir_creates_episodes_subdir(tmp_path):
     assert s.exists()
     assert (s / "episodes").is_dir()
     assert ".kb-publish-staging" in str(s)
+
+
+# ---------------------------------------------------------------------------
+# Task 5: orchestrate_episode_index — Haiku-injected orchestration pipeline
+# ---------------------------------------------------------------------------
+
+import json
+
+from episode_wiki import (
+    orchestrate_episode_index,
+    _validate_extraction_shape,
+    _recompute_existed_before,
+)
+
+
+def _mock_haiku(response_json: dict):
+    """Return a callable that emits the given JSON as a Haiku response."""
+    return lambda prompt: json.dumps(response_json)
+
+
+def test_orchestrate_calls_haiku_with_expected_structure(tmp_path):
+    wiki = tmp_path / "wiki"
+    (wiki / "episodes").mkdir(parents=True)
+    transcript_path = tmp_path / "t.md"
+    transcript_path.write_text("Sample transcript for ep 1.", encoding="utf-8")
+    prompt_path = tmp_path / "prompt.md"
+    prompt_path.write_text(
+        "TEMPLATE\nmeta={episode_metadata}\ntranscript={transcript}\ncat={concept_catalog}\nrecent={recent_episodes}\n",
+        encoding="utf-8",
+    )
+
+    captured_prompts = []
+    def capturing_haiku(p: str) -> str:
+        captured_prompts.append(p)
+        return json.dumps({
+            "summary": "S.",
+            "concepts": [
+                {"slug": "wiki/topic/c", "depth_this_episode": "explained",
+                 "what": "W.", "why_it_matters": "Y.",
+                 "key_points": ["a"], "covered_at_sec": 5.0,
+                 "existed_before": False},
+            ],
+            "open_threads": [],
+            "series_links": {"builds_on": [], "followup_candidates": []},
+        })
+
+    result = orchestrate_episode_index(
+        wiki_dir=wiki, episode_id=1, episode_topic="Topic",
+        episode_date="2026-04-21", episode_depth="explained",
+        audio_file="a.mp3", transcript_path=transcript_path,
+        transcript_file="a.transcript.md", tags=["episode"], aliases=[],
+        source_lessons=[], haiku_call=capturing_haiku,
+        prompt_template_path=prompt_path,
+    )
+    assert len(captured_prompts) == 1
+    assert "Sample transcript for ep 1." in captured_prompts[0]
+    assert result.episode_article.exists()
+
+
+def test_orchestrate_retries_once_on_malformed_then_succeeds(tmp_path):
+    wiki = tmp_path / "wiki"
+    (wiki / "episodes").mkdir(parents=True)
+    transcript_path = tmp_path / "t.md"
+    transcript_path.write_text("X", encoding="utf-8")
+    prompt_path = tmp_path / "prompt.md"
+    prompt_path.write_text("{episode_metadata}{transcript}{concept_catalog}{recent_episodes}", encoding="utf-8")
+
+    call_count = 0
+    def flaky_haiku(p: str) -> str:
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            return "not json"
+        return json.dumps({
+            "summary": "S.",
+            "concepts": [
+                {"slug": "wiki/x/c", "depth_this_episode": "mentioned",
+                 "what": "W.", "why_it_matters": "Y.",
+                 "key_points": ["p"], "covered_at_sec": 1.0,
+                 "existed_before": False}
+            ],
+            "open_threads": [],
+            "series_links": {"builds_on": [], "followup_candidates": []},
+        })
+
+    result = orchestrate_episode_index(
+        wiki_dir=wiki, episode_id=1, episode_topic="T",
+        episode_date="2026-04-21", episode_depth="explained",
+        audio_file="a.mp3", transcript_path=transcript_path,
+        transcript_file="a.t.md", tags=["episode"], aliases=[],
+        source_lessons=[], haiku_call=flaky_haiku,
+        prompt_template_path=prompt_path,
+    )
+    assert call_count == 2
+    assert result.episode_article.exists()
+
+
+def test_orchestrate_aborts_after_two_malformed_responses(tmp_path):
+    wiki = tmp_path / "wiki"
+    (wiki / "episodes").mkdir(parents=True)
+    transcript_path = tmp_path / "t.md"
+    transcript_path.write_text("X", encoding="utf-8")
+    prompt_path = tmp_path / "prompt.md"
+    prompt_path.write_text("{episode_metadata}{transcript}{concept_catalog}{recent_episodes}", encoding="utf-8")
+
+    def bad_haiku(p: str) -> str:
+        return "still not json"
+
+    with pytest.raises(TransactionAbortedError):
+        orchestrate_episode_index(
+            wiki_dir=wiki, episode_id=1, episode_topic="T",
+            episode_date="2026-04-21", episode_depth="explained",
+            audio_file="a.mp3", transcript_path=transcript_path,
+            transcript_file="a.t.md", tags=["episode"], aliases=[],
+            source_lessons=[], haiku_call=bad_haiku,
+            prompt_template_path=prompt_path,
+        )
+    # No episode article
+    assert list((wiki / "episodes").glob("*.md")) == []
+
+
+def test_orchestrate_excludes_current_episode_from_coverage_map(tmp_path):
+    """Reindex must not count the current episode as prior coverage."""
+    wiki = tmp_path / "wiki"
+    (wiki / "episodes").mkdir(parents=True)
+    # Seed existing EP3 covering the concept at deep-dive
+    from tests.conftest import _minimal_episode_article
+    (wiki / "episodes" / "ep-03-old.md").write_text(_minimal_episode_article(3), encoding="utf-8")
+
+    transcript_path = tmp_path / "t.md"
+    transcript_path.write_text("X", encoding="utf-8")
+    prompt_path = tmp_path / "prompt.md"
+    prompt_path.write_text("{episode_metadata}{transcript}{concept_catalog}{recent_episodes}", encoding="utf-8")
+
+    def haiku(p: str) -> str:
+        # Claim the same concept at explained depth — reindex
+        return json.dumps({
+            "summary": "S.",
+            "concepts": [
+                {"slug": "wiki/quantization/k-quants", "depth_this_episode": "explained",
+                 "what": "W.", "why_it_matters": "Y.",
+                 "key_points": ["p"], "covered_at_sec": 1.0,
+                 "existed_before": True}
+            ],
+            "open_threads": [],
+            "series_links": {"builds_on": [], "followup_candidates": []},
+        })
+
+    # Reindexing ep 3 — coverage_map should EXCLUDE ep 3, so the concept
+    # depth_delta_vs_past should resolve to "new" (no prior coverage outside self).
+    result = orchestrate_episode_index(
+        wiki_dir=wiki, episode_id=3, episode_topic="Re-index",
+        episode_date="2026-04-21", episode_depth="explained",
+        audio_file="a.mp3", transcript_path=transcript_path,
+        transcript_file="a.t.md", tags=["episode"], aliases=[],
+        source_lessons=[], haiku_call=haiku,
+        prompt_template_path=prompt_path,
+    )
+    # Read back the written episode article
+    text = result.episode_article.read_text(encoding="utf-8")
+    assert "depth_delta_vs_past: new" in text
+
+
+def test_recompute_existed_before_overrides_haiku_claim(tmp_path):
+    wiki = tmp_path / "wiki"
+    (wiki / "foo").mkdir(parents=True)
+    (wiki / "foo" / "exists.md").write_text("x", encoding="utf-8")
+    concepts = [
+        {"slug": "wiki/foo/exists", "existed_before": False},
+        {"slug": "wiki/foo/missing", "existed_before": True},
+    ]
+    out = _recompute_existed_before(concepts, wiki)
+    assert out[0]["existed_before"] is True
+    assert out[1]["existed_before"] is False
+
+
+def test_validate_extraction_shape_accepts_valid():
+    _validate_extraction_shape({
+        "summary": "s",
+        "concepts": [
+            {"slug": "wiki/x", "depth_this_episode": "explained",
+             "what": "w", "why_it_matters": "y", "key_points": []}
+        ],
+        "open_threads": [],
+    })
+
+
+def test_validate_extraction_shape_rejects_missing_summary():
+    with pytest.raises(TransactionAbortedError):
+        _validate_extraction_shape({"concepts": [], "open_threads": []})
+
+
+def test_validate_extraction_shape_rejects_invalid_depth():
+    with pytest.raises(TransactionAbortedError):
+        _validate_extraction_shape({
+            "summary": "s",
+            "concepts": [
+                {"slug": "wiki/x", "depth_this_episode": "nonsense",
+                 "what": "w", "why_it_matters": "y", "key_points": []}
+            ],
+            "open_threads": [],
+        })

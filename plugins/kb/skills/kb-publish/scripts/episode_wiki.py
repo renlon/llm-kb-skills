@@ -845,3 +845,133 @@ def index_episode_transactional(
         stubs_updated=stubs_updated,
         collisions_skipped=collisions_skipped,
     )
+
+
+# ---------------------------------------------------------------------------
+# Task 5: Orchestration — orchestrate_episode_index (Haiku-injected callable)
+# ---------------------------------------------------------------------------
+
+
+def _validate_extraction_shape(data: dict) -> None:
+    """Raise TransactionAbortedError if the extraction dict is missing required fields.
+
+    Validates top-level keys and per-concept required fields including
+    depth_this_episode enum values.
+    """
+    if not isinstance(data, dict):
+        raise TransactionAbortedError("extraction not a dict")
+    for k in ("summary", "concepts", "open_threads"):
+        if k not in data:
+            raise TransactionAbortedError(f"extraction missing top-level key {k!r}")
+    for c in data.get("concepts", []) or []:
+        for k in ("slug", "depth_this_episode", "what", "why_it_matters", "key_points"):
+            if k not in c:
+                raise TransactionAbortedError(f"concept missing key {k!r}")
+        if c["depth_this_episode"] not in ("mentioned", "explained", "deep-dive"):
+            raise TransactionAbortedError(f"invalid depth_this_episode: {c['depth_this_episode']!r}")
+
+
+def _recompute_existed_before(concepts: list[dict], wiki_dir: Path) -> list[dict]:
+    """Override Haiku's existed_before claim with the actual filesystem state.
+
+    Haiku's claim is advisory; we always re-check the disk.
+    """
+    out = []
+    for c in concepts:
+        rel = slug_to_wiki_relative_path(c["slug"])
+        c = dict(c)
+        c["existed_before"] = (wiki_dir / rel).exists()
+        out.append(c)
+    return out
+
+
+def orchestrate_episode_index(
+    wiki_dir: Path,
+    episode_id: int,
+    episode_topic: str,
+    episode_date: str,
+    episode_depth: str,
+    audio_file: str,
+    transcript_path: Path,
+    transcript_file: str,
+    tags: list[str],
+    aliases: list[str],
+    source_lessons: list[str],
+    haiku_call: Callable[[str], str],
+    prompt_template_path: Path,
+) -> TransactionalIndexResult:
+    """Full pipeline: read transcript, build catalog+context, call Haiku,
+    validate, recompute existed_before, compute depth_deltas excluding current
+    episode, invoke index_episode_transactional, return result.
+
+    Used by kb-publish step 8c (at publish time) and /kb-publish backfill-index.
+    """
+    transcript = transcript_path.read_text(encoding="utf-8")
+    catalog = concept_catalog(wiki_dir, include_stubs=True)
+    all_eps = scan_episode_wiki(wiki_dir, strict=False)
+    # Recent-episodes context: most-recent 3 EXCLUDING the current episode.
+    others = [e for e in all_eps if e.episode_id != episode_id]
+    recent = sorted(others, key=lambda e: e.episode_id, reverse=True)[:3]
+    template = prompt_template_path.read_text(encoding="utf-8")
+
+    prompt = (template
+              .replace("{transcript}", transcript)
+              .replace("{episode_metadata}",
+                       yaml.safe_dump({
+                           "id": episode_id,
+                           "title": f"EP{episode_id} | {episode_topic}",
+                           "date": episode_date,
+                           "depth": episode_depth,
+                           "topic": episode_topic,
+                           "source_lessons": source_lessons,
+                       }, allow_unicode=True))
+              .replace("{concept_catalog}",
+                       yaml.safe_dump(catalog, allow_unicode=True))
+              .replace("{recent_episodes}",
+                       yaml.safe_dump([{
+                           "ep_id": e.episode_id,
+                           "title": e.title,
+                           "depth": e.depth,
+                           "concepts": [c.slug for c in e.concepts],
+                           "open_threads": [t.slug or t.note for t in e.open_threads],
+                       } for e in recent], allow_unicode=True)))
+
+    data = None
+    last_err: Exception | None = None
+    for attempt in range(2):
+        raw = haiku_call(prompt)
+        candidate = raw.strip()
+        # Strip common code fences
+        if candidate.startswith("```"):
+            first_nl = candidate.find("\n")
+            candidate = candidate[first_nl + 1:] if first_nl >= 0 else candidate
+            if candidate.rstrip().endswith("```"):
+                candidate = candidate.rstrip()[:-3]
+        candidate = candidate.strip()
+        try:
+            parsed = json.loads(candidate)
+            _validate_extraction_shape(parsed)
+            data = parsed
+            break
+        except (json.JSONDecodeError, TransactionAbortedError) as e:
+            last_err = e
+            continue
+    if data is None:
+        raise TransactionAbortedError(f"Haiku returned invalid JSON after retry: {last_err}")
+
+    # Recompute existed_before post slug validation (before full transactional call)
+    # NOTE: slug validation happens inside index_episode_transactional; if that
+    # raises, we abort. Here we just normalize existed_before from disk.
+    data["concepts"] = _recompute_existed_before(data["concepts"], wiki_dir)
+
+    # Coverage map excluding current episode
+    coverage = concepts_covered_by_episodes(others)
+    data["concepts"] = compute_depth_deltas(data["concepts"], coverage)
+
+    return index_episode_transactional(
+        wiki_dir=wiki_dir, episode_id=episode_id, episode_topic=episode_topic,
+        episode_date=episode_date, episode_depth=episode_depth,
+        audio_file=audio_file, transcript_file=transcript_file,
+        tags=tags, aliases=aliases, source_lessons=source_lessons,
+        extraction=data,
+    )
