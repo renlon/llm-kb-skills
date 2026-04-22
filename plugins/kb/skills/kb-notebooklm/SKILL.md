@@ -499,6 +499,52 @@ Each workflow follows a common pattern: select source files from the KB, filter 
 
    The podcast generation prompt (`prompts/podcast-tutor.md`) already contains an instruction that proprietary systems must be referenced in generic terms only. That is a secondary defense. The PRIMARY defense is ensuring no raw internal content ever reaches NotebookLM in the first place.
 
+5b. **Dedup judge (replaces the former string-match cross-check):**
+
+   Runs AFTER step 4b's confidentiality filter so the judge only reads sanitized lesson variants (never raw internal content).
+
+   **Pre-compute (Python, no LLM):**
+
+   For each selected lesson (generic or sanitized variant from step 4b step 4b.5):
+   - Read title + first 400 tokens to extract rough candidate concept names.
+   - For each candidate, best-effort resolve to a wiki slug via `resolve_concept_candidate()` (title or alias match, never tags).
+
+   **Invoke the judge:**
+
+   Shell out to `plugins/kb/skills/kb-publish/scripts/episode_wiki.py:judge_candidate_episode()`:
+
+   ```python
+   import sys
+   sys.path.insert(0, '<vault>/plugins/kb/skills/kb-publish/scripts')
+   from episode_wiki import judge_candidate_episode
+   from anthropic import Anthropic
+   client = Anthropic()
+   def haiku(prompt: str) -> str:
+       resp = client.messages.create(model='claude-haiku-4-5-20251001',
+                                     max_tokens=4096,
+                                     messages=[{'role':'user','content':prompt}])
+       return ''.join(b.text for b in resp.content if hasattr(b, 'text'))
+   judgement = judge_candidate_episode(
+       wiki_dir=<integrations.notebooklm.wiki_path>,
+       candidate_concepts=<list from pre-compute>,
+       haiku_call=haiku,
+       prompt_template_path=<kb-notebooklm skill dir>/prompts/dedup-judge.md,
+   )
+   ```
+
+   **Present results to user:**
+
+   Render the judge's `per_concept` verdicts, `episode_verdict`, and `framing_recommendation` in a confirmation prompt following the format in spec §4. Wait for user approval before proceeding to step 6.
+
+   **Backwards compat for pre-backfill episodes:**
+
+   Any published episode in `episodes.yaml` with `status: published` but no corresponding `wiki/episodes/ep-<N>-*.md` file surfaces a warning to the user: "EP<N> is published but not yet indexed. Run `/kb-publish backfill-index --episode <N>` to improve dedup accuracy." Proceed with whatever index data is available.
+
+   **Error handling:**
+   - If `wiki_dir` doesn't exist or has no `episodes/` subdir: log warning "no indexed episodes yet; proceeding as if novel", skip the judge call.
+   - If Haiku call fails or returns malformed JSON: log warning, surface to user, ask whether to proceed anyway.
+   - If dedup-judge.md prompt file missing: hard error; skip step 5b entirely.
+
 5. **Topic grouping — one main topic per episode:** Each episode MUST focus on one coherent main topic. Group lessons so that every lesson in an episode is directly related to the same theme. This produces focused, deep teaching episodes rather than shallow multi-topic surveys.
 
    **Grouping algorithm:**
@@ -534,8 +580,6 @@ Each workflow follows a common pattern: select source files from the KB, filter 
    Proceed with all M episodes in parallel?
    ```
    Wait for user confirmation. User may adjust grouping, move lessons between episodes, or merge episodes.
-
-5b. **Published topic cross-check:** If episode registry is available (see Episode Continuity section), run the cross-check against published episodes. Present overlap findings to the user and wait for confirmation before proceeding to generation.
 
 6. **For each episode group (or single batch), execute steps 6a-6k:**
 

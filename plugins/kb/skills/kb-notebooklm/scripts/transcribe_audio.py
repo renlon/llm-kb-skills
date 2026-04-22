@@ -294,10 +294,13 @@ def diarize_with_pyannote(audio_path: str, *, hf_token: str) -> list[dict[str, A
         pipeline = Pipeline.from_pretrained(
             "pyannote/speaker-diarization-3.1", use_auth_token=hf_token
         )
-    diarization = pipeline(audio_path, num_speakers=2)
+    result = pipeline(audio_path, num_speakers=2)
+    # pyannote 4.x returns a DiarizeOutput dataclass wrapping the old Annotation
+    # under a `speaker_diarization` field; 3.x returns the Annotation directly.
+    annotation = getattr(result, "speaker_diarization", result)
     return [
         {"start": float(turn.start), "end": float(turn.end), "speaker": str(label)}
-        for turn, _, label in diarization.itertracks(yield_label=True)
+        for turn, _, label in annotation.itertracks(yield_label=True)
     ]
 
 

@@ -371,6 +371,98 @@ Based on the JSON result:
      - `transcript`: `null` (unknown)
 6. Write `episodes.yaml` atomically (write to temp file, rename).
 
+### Step 8c — Episode wiki indexing (best-effort, non-publish-blocking, transactional)
+
+After step 8b's registry update succeeds, index the episode into the wiki. This step is **non-publish-blocking**: any failure here logs and returns; the episode is still considered successfully published and indexing is retriable via `/kb-publish backfill-index --episode N`.
+
+**Transcript gate:** Read the current episode's registry entry. If `transcript.applied` is `false`, `null`, or `transcript.markdown` is `null` or missing:
+- Log: "Skipping episode indexing — no transcript available (transcript.applied is false/null). Retry with `/kb-publish backfill-index --episode <N>`."
+- Return. Episode remains published successfully.
+
+**Index pipeline:** Delegate to `backfill_index.backfill_episode()` (imported from `plugins/kb/skills/kb-publish/scripts/backfill_index.py`), which calls `orchestrate_episode_index()` from `episode_wiki.py` — the shared helper used by both step 8c and the `/kb-publish backfill-index` subcommand. The full pipeline:
+
+1. Read `transcript.markdown` (resolve relative to the audio file's parent directory).
+2. Build concept catalog via `concept_catalog(wiki_dir, include_stubs=True)`. Stubs are included so Haiku canonicalizes to them and avoids duplicate-stub proliferation.
+3. Build recent-episodes context from `wiki/episodes/*.md` via `scan_episode_wiki(wiki_dir, strict=False)` — filtered to the 3 most-recent published episodes plus any whose tags overlap with this episode's tags.
+4. Call Haiku with the `episode-wiki-extract.md` prompt. Retry once on malformed JSON output.
+5. Validate the JSON response: required keys present, `depth_this_episode` in `{mentioned, explained, deep-dive}`, all slugs pass `validate_slug()`, recompute `existed_before` from the filesystem (not from Haiku's claim).
+6. Compute `depth_delta_vs_past` and `prior_episode_ref` via `compute_depth_deltas()` — coverage_map is built from all episodes EXCLUDING this episode's `episode_id` to prevent self-counting on reindex.
+7. Call `index_episode_transactional(wiki_dir, ...)`:
+   - Stages the rendered episode article at `<vault>/.kb-publish-staging/<uuid>/episodes/ep-<id>-<slug>.md`.
+   - Stages freshly-rendered auto-stubs for concepts with `existed_before: false`.
+   - For concepts with `existed_before: true` that ARE stubs: updates `last_seen_by`, `best_depth_episode`, `best_depth`, `referenced_by` (never `created_by` — immutable provenance).
+   - Runs `scan_episode_wiki(staging_dir, strict=True)` as smoke-parse. On failure, aborts and cleans up staging — existing wiki is untouched.
+   - Commits atomically: stubs first (skipping non-stub collisions), then stub frontmatter updates, finally the episode article via `os.replace()` (episode article lands last so its wikilinks resolve at the moment it becomes visible).
+8. Update this episode's `concepts_covered[]` and `open_threads[]` in `episodes.yaml` from the extraction result. Do NOT modify `id`, `title`, `description`, `date`, `status`, `hosts`, `transcript`, `intro_applied`, or `source_lessons`.
+
+**On failure at any step above:** Log the error, leave existing wiki and `episodes.yaml` unchanged, and return. Do NOT abort the publish. The episode is still successfully published; the index is retriable via `/kb-publish backfill-index --episode <N>`.
+
+**Partial-failure case** (wiki commit succeeded but registry update step 8 above failed): log clearly — "Wiki index committed but episodes.yaml update failed for EP<N>. Run `backfill-index --episode <N>` to sync." Do NOT roll back the wiki commit.
+
+**On success:** Log: `"Indexed EP<N>: <concept_count> concepts, <new_stubs_created> new stubs, <stubs_updated> stubs updated, <collisions_skipped> collisions skipped."`
+
+---
+
+## Backfill Index
+
+**Invocation:** `/kb-publish backfill-index [--episode N | --all]`
+
+Use this subcommand to:
+- **One-off backfill** already-published episodes that pre-date the episode index feature (e.g. EP1, EP2 published before step 8c existed). These episodes have no `wiki/episodes/ep-<N>-*.md` record yet.
+- **Re-index a drifted episode** whose wiki record has become stale, corrupted, or lost.
+- **Retry a failed step 8c** — if step 8c errored at publish time (transcript missing, Haiku failed, disk issue), re-run it at any time without republishing.
+
+### Shared codepath
+
+`backfill-index` and step 8c both call `orchestrate_episode_index()` from `plugins/kb/skills/kb-publish/scripts/episode_wiki.py`. This is the shared orchestration helper that runs: read transcript → build catalog + context → call Haiku → validate → compute depth deltas → `index_episode_transactional()` → update registry. Neither caller duplicates the pipeline.
+
+### Per-episode algorithm
+
+For each episode to process (one or all):
+
+1. Read the episode entry from `episodes.yaml`. Skip unless `status: published`.
+2. Resolve the audio file: `audio` is a basename. Check (in order) `<notebooklm.output_path>/<audio>`, then `<notebooklm.output_path>/notebooklm/<audio>`. If not found, warn and skip.
+3. **Transcript resolution:**
+   - If `transcript.markdown` is set in the registry AND that file exists: use it, proceed to step 4.
+   - Else look for `<audio_dir>/<audio_stem>.transcript.md` on disk. If found, use it and patch the registry.
+   - Otherwise: **transcribe the audio** by shelling out to `transcribe_audio.py` in the notebooklm venv (kb-publish does NOT install its own transcription dependency — it reuses the notebooklm venv which has `faster-whisper` + `pyannote` installed):
+     ```bash
+     source <notebooklm_venv>/bin/activate && \
+       python3 <notebooklm_skill_dir>/scripts/transcribe_audio.py \
+         --audio <absolute_audio_path> \
+         --hosts '<json-encoded host_pool>' \
+         --output-vtt <audio_dir>/<audio_stem>.vtt \
+         --output-md <audio_dir>/<audio_stem>.transcript.md \
+         --vtt-offset-seconds 0 \
+         --model <transcript.model or 'large-v3'> \
+         --device <transcript.device or 'auto'> \
+         --language <transcript.language or 'zh'> \
+         --title "全栈AI — <episode.topic> (<episode.date>)" \
+         --json
+     ```
+     `--vtt-offset-seconds 0` is correct for pre-feature episodes: the delivered audio IS the raw transcribed audio (no intro-music offset). After transcription, patch the registry: set `transcript.applied = true`, `transcript.vtt`, `transcript.markdown`, `transcript.speaker_count`.
+
+   **First-run transcription for EP1/EP2 will take ~5–15 min per episode on CPU.** Use `--device cuda` if a GPU is available.
+
+4. Delegate to `backfill_index.backfill_episode(episode_id)`, which calls `orchestrate_episode_index()` — same flow as step 8c steps 2–8 above.
+5. Update `episodes.yaml` for this episode (step 8c step 8).
+6. Print progress line: `EP<N>: [transcribing... done (<duration>). ] Extracting... <count> concepts, <stubs> stubs. Written wiki/episodes/ep-<N>-<slug>.md`
+
+### `--all` behavior
+
+Iterate over every published episode in `episodes.yaml` in ascending `id` order. Continue on per-episode errors (log and skip). Print a final summary: `"Backfill complete: <N> indexed, <M> skipped (errors above)."` 
+
+### Error handling
+
+| Condition | Behavior |
+|---|---|
+| Episode not published (`status != published`) | Skip silently |
+| Audio file not found | Warn and skip this episode |
+| Transcription fails (non-zero exit) | Log error, skip this episode |
+| Haiku returns malformed JSON (after 1 retry) | Log error, skip this episode — no partial data written |
+| Slug validation failure | Log error, abort indexing for this episode |
+| Wiki write fails (disk full, permissions) | Log, abort this episode's indexing, `episodes.yaml` untouched |
+
 ---
 
 ## First-Run Setup
