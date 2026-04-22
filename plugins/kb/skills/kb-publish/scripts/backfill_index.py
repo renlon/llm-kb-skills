@@ -167,7 +167,7 @@ def _make_haiku_call(model: str | None = None) -> Callable[[str], str]:
     def _call(prompt: str) -> str:
         resp = client.messages.create(
             model=model,
-            max_tokens=8192,
+            max_tokens=32000,  # Large enough for 15-40 concepts × multi-line key_points
             messages=[{"role": "user", "content": prompt}],
         )
         return "".join(b.text for b in resp.content if hasattr(b, "text"))

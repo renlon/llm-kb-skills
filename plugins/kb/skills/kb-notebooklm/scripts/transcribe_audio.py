@@ -95,20 +95,22 @@ def split_segment_by_diarization(
                 "start": w["start"],
                 "end": w["end"],
                 "speaker": sp,
-                "text": w["word"].strip(),
+                "text": w["word"],  # preserve faster-whisper's leading space convention
             }
         else:
             current["end"] = w["end"]
-            # Space-separate tokens. strip() removes leading space from faster-whisper's
-            # raw word forms (they typically start with a space).
-            current["text"] = (current["text"] + " " + w["word"].strip()).strip()
+            # Append verbatim — faster-whisper tokens include their own leading
+            # space for space-delimited languages (English, etc.) and are bare
+            # for CJK where characters join without separators.
+            current["text"] = current["text"] + w["word"]
 
     if current is not None:
         subs.append(current)
 
-    # Clean doubled spaces from naive joining.
+    # Trim each sub-segment: strip once at the boundary, collapse runs of
+    # whitespace inside to a single space (preserves intra-CJK no-space joins).
     for s in subs:
-        s["text"] = re.sub(r"\s+", " ", s["text"]).strip()
+        s["text"] = re.sub(r" +", " ", s["text"]).strip()
 
     return subs
 

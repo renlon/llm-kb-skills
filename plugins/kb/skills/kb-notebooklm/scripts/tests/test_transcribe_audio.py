@@ -80,6 +80,39 @@ def test_align_words_single_speaker(fake_whisper_segment, fake_diarization_turn)
     assert subs[0]["end"] == pytest.approx(4.0, abs=0.01)
 
 
+def test_align_words_no_spaces_inserted_between_cjk_tokens(fake_diarization_turn):
+    """CJK tokens from faster-whisper don't include leading spaces; alignment
+    must not insert them. Without this guarantee, Chinese transcripts read as
+    '你 好 世 界' instead of '你好世界'."""
+    # Simulate faster-whisper CJK output: each char is its own word, no leading space.
+    words = [
+        {"start": 0.0, "end": 0.3, "word": "你"},
+        {"start": 0.3, "end": 0.6, "word": "好"},
+        {"start": 0.6, "end": 0.9, "word": "世"},
+        {"start": 0.9, "end": 1.2, "word": "界"},
+    ]
+    seg = {"start": 0.0, "end": 1.2, "text": "你好世界", "words": words}
+    turns = [fake_diarization_turn(0.0, 1.2, "SPEAKER_00")]
+    subs = T.split_segment_by_diarization(seg, turns)
+    assert len(subs) == 1
+    assert subs[0]["text"] == "你好世界"
+
+
+def test_align_words_preserves_english_spacing(fake_whisper_segment, fake_diarization_turn):
+    """English faster-whisper tokens include their own leading space. Alignment
+    concatenates verbatim, producing correct spacing without double-spaces."""
+    words = [
+        {"start": 0.0, "end": 0.5, "word": "Hello"},       # first word no leading space
+        {"start": 0.5, "end": 0.9, "word": " world"},      # subsequent have leading space
+        {"start": 0.9, "end": 1.3, "word": " how"},
+    ]
+    seg = {"start": 0.0, "end": 1.3, "text": "Hello world how", "words": words}
+    turns = [fake_diarization_turn(0.0, 1.3, "SPEAKER_00")]
+    subs = T.split_segment_by_diarization(seg, turns)
+    assert len(subs) == 1
+    assert subs[0]["text"] == "Hello world how"
+
+
 def test_align_words_splits_at_diarization_boundary(fake_whisper_segment, fake_diarization_turn):
     """A single whisper segment whose words span two turns must split into two subs."""
     seg = fake_whisper_segment(0.0, 4.0, "hello world how are you")
