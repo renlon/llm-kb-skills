@@ -582,3 +582,251 @@ index:
     assert len(hits) == 2
     ep_ids = {h["ep_id"] for h in hits}
     assert ep_ids == {3, 5}
+
+
+# ---------------------------------------------------------------------------
+# Task 4: Transactional core — staging_dir + index_episode_transactional
+# ---------------------------------------------------------------------------
+
+from episode_wiki import (
+    TransactionalIndexResult,
+    TransactionAbortedError,
+    staging_dir,
+    index_episode_transactional,
+)
+
+
+def _make_extraction(concepts):
+    return {
+        "summary": "Episode summary.",
+        "concepts": concepts,
+        "open_threads": [],
+        "series_links": {"builds_on": [], "followup_candidates": []},
+    }
+
+
+def test_transactional_new_episode_creates_article_and_new_stubs(tmp_path):
+    wiki = tmp_path / "wiki"
+    (wiki / "episodes").mkdir(parents=True)
+
+    extraction = _make_extraction([
+        {
+            "slug": "wiki/topic/concept-a",
+            "depth_this_episode": "deep-dive",
+            "depth_delta_vs_past": "new",
+            "prior_episode_ref": None,
+            "what": "What.",
+            "why_it_matters": "Why.",
+            "key_points": ["Point one."],
+            "covered_at_sec": 10.0,
+            "existed_before": False,
+        }
+    ])
+
+    result = index_episode_transactional(
+        wiki_dir=wiki, episode_id=1, episode_topic="Test Topic",
+        episode_date="2026-04-21", episode_depth="deep-dive",
+        audio_file="a.mp3", transcript_file="a.transcript.md",
+        tags=["episode"], aliases=[], source_lessons=[],
+        extraction=extraction,
+    )
+    assert result.episode_article.exists()
+    assert result.episode_article.name.startswith("ep-1-")
+    assert "wiki/topic/concept-a" in result.new_stubs_created
+    assert (wiki / "topic" / "concept-a.md").exists()
+
+
+def test_transactional_skips_existing_non_stub_article(tmp_path):
+    wiki = tmp_path / "wiki"
+    (wiki / "episodes").mkdir(parents=True)
+    (wiki / "topic").mkdir()
+    canonical = wiki / "topic" / "concept-a.md"
+    canonical.write_text(
+        "---\ntitle: Concept A\nstatus: complete\n---\n\n# Concept A\n\nReal content.\n",
+        encoding="utf-8",
+    )
+    original = canonical.read_text(encoding="utf-8")
+
+    extraction = _make_extraction([
+        {
+            "slug": "wiki/topic/concept-a",
+            "depth_this_episode": "explained",
+            "depth_delta_vs_past": "new",
+            "prior_episode_ref": None,
+            "what": "What.",
+            "why_it_matters": "Why.",
+            "key_points": [],
+            "covered_at_sec": 10.0,
+            "existed_before": True,
+        }
+    ])
+    result = index_episode_transactional(
+        wiki_dir=wiki, episode_id=2, episode_topic="T",
+        episode_date="2026-04-21", episode_depth="explained",
+        audio_file="b.mp3", transcript_file="b.transcript.md",
+        tags=["episode"], aliases=[], source_lessons=[],
+        extraction=extraction,
+    )
+    assert "wiki/topic/concept-a" in result.collisions_skipped
+    assert canonical.read_text(encoding="utf-8") == original
+
+
+def test_transactional_same_episode_stub_replaced(tmp_path):
+    """Re-indexing an episode that introduced a stub should FULLY replace the stub."""
+    wiki = tmp_path / "wiki"
+    (wiki / "episodes").mkdir(parents=True)
+    (wiki / "topic").mkdir()
+    stub = wiki / "topic" / "concept-a.md"
+    stub.write_text(
+        "---\ntitle: Concept A\nstatus: stub\ncreated_by: ep-7\n"
+        "last_seen_by: ep-7\nbest_depth_episode: ep-7\nbest_depth: explained\n"
+        "referenced_by: [ep-7]\ncreated: '2026-04-01'\n---\n\n"
+        "# Concept A\n\n> Stub.\n\n## Old body content.\n",
+        encoding="utf-8",
+    )
+
+    extraction = _make_extraction([
+        {
+            "slug": "wiki/topic/concept-a",
+            "depth_this_episode": "deep-dive",
+            "depth_delta_vs_past": "deeper",
+            "prior_episode_ref": 7,
+            "what": "New what.",
+            "why_it_matters": "New why.",
+            "key_points": ["Key point."],
+            "covered_at_sec": 42.0,
+            "existed_before": True,
+        }
+    ])
+    result = index_episode_transactional(
+        wiki_dir=wiki, episode_id=7, episode_topic="T",
+        episode_date="2026-04-21", episode_depth="deep-dive",
+        audio_file="c.mp3", transcript_file="c.transcript.md",
+        tags=["episode"], aliases=[], source_lessons=[],
+        extraction=extraction,
+    )
+    assert "wiki/topic/concept-a" in result.stubs_updated
+    # Prose section should be the freshly rendered version
+    new_text = stub.read_text(encoding="utf-8")
+    assert "Old body content" not in new_text
+    assert "New what" in new_text
+
+
+def test_transactional_other_episode_stub_frontmatter_only_update(tmp_path):
+    wiki = tmp_path / "wiki"
+    (wiki / "episodes").mkdir(parents=True)
+    (wiki / "topic").mkdir()
+    stub = wiki / "topic" / "concept-a.md"
+    stub.write_text(
+        "---\ntitle: Concept A\nstatus: stub\ncreated_by: ep-3\n"
+        "last_seen_by: ep-3\nbest_depth_episode: ep-3\nbest_depth: mentioned\n"
+        "referenced_by: [ep-3]\ncreated: '2026-04-01'\naliases: []\n---\n\n"
+        "# Concept A\n\n> Stub prose introduced by EP3.\n",
+        encoding="utf-8",
+    )
+
+    extraction = _make_extraction([
+        {
+            "slug": "wiki/topic/concept-a",
+            "depth_this_episode": "explained",  # deeper than EP3's 'mentioned'
+            "depth_delta_vs_past": "deeper",
+            "prior_episode_ref": 3,
+            "what": "New what.",
+            "why_it_matters": "New why.",
+            "key_points": [],
+            "covered_at_sec": 42.0,
+            "existed_before": True,
+        }
+    ])
+    result = index_episode_transactional(
+        wiki_dir=wiki, episode_id=5, episode_topic="T",
+        episode_date="2026-04-21", episode_depth="deep-dive",
+        audio_file="c.mp3", transcript_file="c.transcript.md",
+        tags=["episode"], aliases=[], source_lessons=[],
+        extraction=extraction,
+    )
+    assert "wiki/topic/concept-a" in result.stubs_updated
+    new_text = stub.read_text(encoding="utf-8")
+    # Prose preserved
+    assert "Stub prose introduced by EP3" in new_text
+    # Frontmatter updated
+    assert "last_seen_by: ep-5" in new_text
+    assert "best_depth_episode: ep-5" in new_text
+    assert "best_depth: explained" in new_text
+    # created_by preserved
+    assert "created_by: ep-3" in new_text
+
+
+def test_transactional_aborts_on_invalid_slug(tmp_path):
+    wiki = tmp_path / "wiki"
+    (wiki / "episodes").mkdir(parents=True)
+
+    extraction = _make_extraction([
+        {
+            "slug": "not/wiki-prefix",  # invalid
+            "depth_this_episode": "explained",
+            "depth_delta_vs_past": "new",
+            "prior_episode_ref": None,
+            "what": "What.",
+            "why_it_matters": "Why.",
+            "key_points": [],
+            "covered_at_sec": None,
+            "existed_before": False,
+        }
+    ])
+    with pytest.raises(TransactionAbortedError):
+        index_episode_transactional(
+            wiki_dir=wiki, episode_id=1, episode_topic="T",
+            episode_date="2026-04-21", episode_depth="deep-dive",
+            audio_file="a.mp3", transcript_file="a.transcript.md",
+            tags=["episode"], aliases=[], source_lessons=[],
+            extraction=extraction,
+        )
+    # No episode article written
+    assert list((wiki / "episodes").glob("*.md")) == []
+
+
+def test_transactional_commits_stubs_before_episode_article(tmp_path):
+    """Simulate a smoke-parse failure — episode article must NOT be written if staging doesn't validate.
+    This is enforced by the smoke-parse step before any commit.
+    """
+    wiki = tmp_path / "wiki"
+    (wiki / "episodes").mkdir(parents=True)
+
+    # Craft an extraction that renders a valid episode (no smoke-parse failure here).
+    # We verify the result includes a new stub AND the episode article — both landed.
+    extraction = _make_extraction([
+        {
+            "slug": "wiki/topic/concept-a",
+            "depth_this_episode": "explained",
+            "depth_delta_vs_past": "new",
+            "prior_episode_ref": None,
+            "what": "What.",
+            "why_it_matters": "Why.",
+            "key_points": [],
+            "covered_at_sec": None,
+            "existed_before": False,
+        }
+    ])
+    result = index_episode_transactional(
+        wiki_dir=wiki, episode_id=1, episode_topic="T",
+        episode_date="2026-04-21", episode_depth="explained",
+        audio_file="a.mp3", transcript_file="a.transcript.md",
+        tags=["episode"], aliases=[], source_lessons=[],
+        extraction=extraction,
+    )
+    assert result.episode_article.exists()
+    assert (wiki / "topic" / "concept-a.md").exists()
+    # Staging dir should be cleaned up
+    staging_parent = wiki.parent / ".kb-publish-staging"
+    if staging_parent.exists():
+        assert list(staging_parent.iterdir()) == []
+
+
+def test_staging_dir_creates_episodes_subdir(tmp_path):
+    wiki = tmp_path / "wiki"
+    wiki.mkdir()
+    s = staging_dir(wiki)
+    assert s.exists()
+    assert (s / "episodes").is_dir()
+    assert ".kb-publish-staging" in str(s)

@@ -654,3 +654,194 @@ def concepts_covered_by_episodes(
                 "date": ep.date,
             })
     return out
+
+
+# ---------------------------------------------------------------------------
+# Task 4: Transactional core — staging + atomic commit
+# ---------------------------------------------------------------------------
+
+import shutil
+
+
+def staging_dir(wiki_dir: Path) -> Path:
+    """Create and return a unique per-session staging directory with an episodes/ subdir.
+
+    Location: <wiki_dir.parent>/.kb-publish-staging/<uuid>/
+    The caller owns cleanup; index_episode_transactional always removes it in finally.
+    """
+    root = wiki_dir.parent / ".kb-publish-staging" / uuid.uuid4().hex
+    (root / "episodes").mkdir(parents=True, exist_ok=False)
+    return root
+
+
+def _split_frontmatter(text: str) -> tuple[dict, str]:
+    """Split a markdown string into (frontmatter_dict, body_string).
+
+    body_string starts immediately after the closing '---\\n' delimiter.
+    Returns ({}, text) if no valid frontmatter is found.
+    """
+    if not text.startswith("---\n"):
+        return {}, text
+    end = text.find("\n---\n", 4)
+    if end < 0:
+        return {}, text
+    fm = yaml.safe_load(text[4:end]) or {}
+    return fm, text[end + len("\n---\n"):]
+
+
+def _iter_staged_non_episode(staging: Path):
+    """Yield relative Path objects for all staged .md files outside the episodes/ subdir."""
+    for fp in staging.rglob("*.md"):
+        rel = fp.relative_to(staging)
+        if rel.parts[0] == "episodes":
+            continue
+        yield rel
+
+
+def index_episode_transactional(
+    wiki_dir: Path,
+    episode_id: int,
+    episode_topic: str,
+    episode_date: str,
+    episode_depth: str,
+    audio_file: str,
+    transcript_file: str,
+    tags: list[str],
+    aliases: list[str],
+    source_lessons: list[str],
+    extraction: dict,
+) -> TransactionalIndexResult:
+    """Stage, smoke-parse, then atomically commit an episode article and concept stubs.
+
+    The caller supplies a post-validated extraction dict (Haiku not called here).
+    Raises TransactionAbortedError on any pre-commit failure; no wiki files are
+    touched when an exception is raised.
+
+    Commit order: stubs first (wikilinks must resolve before episode article lands),
+    then other-episode stub frontmatter updates, then episode article last.
+    """
+    # 1. Determine episode filename slug and validate the resulting episode slug.
+    filename_slug = normalize_filename_slug(episode_topic, aliases)
+    validate_slug(f"wiki/episodes/ep-{episode_id}-{filename_slug}", allow_episode=True)
+    ep_article_basename = f"ep-{episode_id}-{filename_slug}.md"
+
+    # 2. Create isolated staging area.
+    staging = staging_dir(wiki_dir)
+    new_stubs: list[str] = []
+    stubs_updated: list[str] = []
+    collisions_skipped: list[str] = []
+    # Deferred frontmatter-only updates for stubs owned by a different episode.
+    stub_updates_to_apply: list[tuple[Path, dict]] = []
+
+    try:
+        # 3. Validate ALL concept slugs before any I/O.
+        for c in extraction["concepts"]:
+            validate_slug(c["slug"], allow_episode=False)
+
+        # 4. Stage stubs and compute frontmatter-only updates.
+        for c in extraction["concepts"]:
+            rel = slug_to_wiki_relative_path(c["slug"])
+            dest = wiki_dir / rel
+            ep_tag = f"ep-{episode_id}"
+
+            if dest.exists():
+                fm, _body = _split_frontmatter(dest.read_text(encoding="utf-8"))
+                if fm.get("status") == "stub":
+                    if fm.get("created_by") == ep_tag:
+                        # Same-episode reindex: fully replace the stub in staging.
+                        staged = staging / rel
+                        staged.parent.mkdir(parents=True, exist_ok=True)
+                        staged.write_text(
+                            render_stub(
+                                c["slug"], c, episode_id,
+                                ep_article_basename.replace(".md", ""),
+                                episode_date,
+                            ),
+                            encoding="utf-8",
+                        )
+                        stubs_updated.append(c["slug"])
+                    else:
+                        # Different-episode stub: frontmatter-only update at commit time.
+                        updated_fm = compute_stub_update(fm, c, episode_id)
+                        if updated_fm is not None:
+                            stub_updates_to_apply.append((dest, updated_fm))
+                            stubs_updated.append(c["slug"])
+                else:
+                    # Non-stub canonical article: leave untouched.
+                    collisions_skipped.append(c["slug"])
+            else:
+                # Brand-new stub: stage the full article.
+                staged = staging / rel
+                staged.parent.mkdir(parents=True, exist_ok=True)
+                staged.write_text(
+                    render_stub(
+                        c["slug"], c, episode_id,
+                        ep_article_basename.replace(".md", ""),
+                        episode_date,
+                    ),
+                    encoding="utf-8",
+                )
+                new_stubs.append(c["slug"])
+
+        # 5. Render and stage the episode article.
+        ep_md = render_episode_wiki(
+            episode_id=episode_id,
+            title=extraction.get("episode_title_override") or f"EP{episode_id} | {episode_topic}",
+            date=episode_date,
+            depth=episode_depth,
+            audio_file=audio_file,
+            transcript_file=transcript_file,
+            summary=extraction["summary"],
+            concepts=extraction["concepts"],
+            open_threads=extraction["open_threads"],
+            series_builds_on=extraction["series_links"]["builds_on"],
+            series_followup_candidates=extraction["series_links"]["followup_candidates"],
+            source_lessons=source_lessons,
+            tags=tags,
+            aliases=aliases,
+        )
+        (staging / "episodes" / ep_article_basename).write_text(ep_md, encoding="utf-8")
+
+        # 6. Smoke-parse staging in strict mode — aborts before any wiki writes on failure.
+        scan_episode_wiki(staging, strict=True)
+
+        # 7. Commit — stubs first (new/replaced), then other-ep frontmatter updates, episode last.
+        for rel_md in _iter_staged_non_episode(staging):
+            src = staging / rel_md
+            dst = wiki_dir / rel_md
+            if dst.exists():
+                existing_fm, _ = _split_frontmatter(dst.read_text(encoding="utf-8"))
+                if existing_fm.get("status") != "stub":
+                    # Concurrent race: article was promoted while we staged. Skip.
+                    continue
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            os.replace(src, dst)
+
+        for dest, updated_fm in stub_updates_to_apply:
+            text = dest.read_text(encoding="utf-8")
+            _, body = _split_frontmatter(text)
+            new_text = (
+                "---\n"
+                + yaml.safe_dump(updated_fm, allow_unicode=True, sort_keys=False)
+                + "---\n"
+                + body
+            )
+            tmp = dest.with_suffix(dest.suffix + ".tmp")
+            tmp.write_text(new_text, encoding="utf-8")
+            os.replace(tmp, dest)
+
+        ep_dst = wiki_dir / "episodes" / ep_article_basename
+        ep_dst.parent.mkdir(parents=True, exist_ok=True)
+        os.replace(staging / "episodes" / ep_article_basename, ep_dst)
+
+    except (SlugValidationError, EpisodeParseError, KeyError) as e:
+        raise TransactionAbortedError(str(e)) from e
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
+
+    return TransactionalIndexResult(
+        episode_article=ep_dst,
+        new_stubs_created=new_stubs,
+        stubs_updated=stubs_updated,
+        collisions_skipped=collisions_skipped,
+    )
