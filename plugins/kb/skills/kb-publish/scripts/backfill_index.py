@@ -129,17 +129,40 @@ def _run_transcribe_subprocess(
         raise RuntimeError(f"transcribe_audio.py stdout was not JSON: {e}") from e
 
 
-def _make_haiku_call(model: str = "claude-haiku-4-5-20251001") -> Callable[[str], str]:
-    """Build a Haiku caller using the Anthropic SDK."""
-    try:
-        from anthropic import Anthropic
-    except ImportError as e:
-        raise RuntimeError(
-            "The 'anthropic' package is required. "
-            "Install with: pip install anthropic"
-        ) from e
+def _make_haiku_call(model: str | None = None) -> Callable[[str], str]:
+    """Build a Haiku caller, auto-detecting Bedrock vs direct Anthropic API.
 
-    client = Anthropic()
+    Bedrock path (when CLAUDE_CODE_USE_BEDROCK=1 or AWS_REGION is set):
+      uses anthropic.AnthropicBedrock; model IDs follow Bedrock naming
+      (from ANTHROPIC_DEFAULT_HAIKU_MODEL if set).
+
+    Direct API path: uses anthropic.Anthropic with ANTHROPIC_API_KEY.
+    """
+    use_bedrock = os.environ.get("CLAUDE_CODE_USE_BEDROCK") == "1" or bool(os.environ.get("AWS_REGION"))
+    if model is None:
+        if use_bedrock:
+            model = os.environ.get("ANTHROPIC_DEFAULT_HAIKU_MODEL", "us.anthropic.claude-haiku-4-5-20251001-v1:0")
+        else:
+            model = "claude-haiku-4-5-20251001"
+
+    if use_bedrock:
+        try:
+            from anthropic import AnthropicBedrock
+        except ImportError as e:
+            raise RuntimeError(
+                "The 'anthropic' package with Bedrock support is required. "
+                "Install with: pip install 'anthropic[bedrock]'"
+            ) from e
+        client = AnthropicBedrock()
+    else:
+        try:
+            from anthropic import Anthropic
+        except ImportError as e:
+            raise RuntimeError(
+                "The 'anthropic' package is required. "
+                "Install with: pip install anthropic"
+            ) from e
+        client = Anthropic()
 
     def _call(prompt: str) -> str:
         resp = client.messages.create(
