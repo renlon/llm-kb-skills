@@ -14,6 +14,15 @@ The audience is the general AI/ML engineering community. This podcast teaches un
 - Frame patterns and tradeoffs as industry knowledge, not as "how Company X does it."
 The goal: a listener should learn transferable AI/ML concepts, with no way to identify or infer the speaker's employer or internal systems from the content.
 
+IMPORTANT — TECHNICAL TERMS, ACRONYMS, AND PROPER NOUNS:
+Assume the listener has ZERO prior context about any technical term, acronym, proper noun, library name, framework name, algorithm name, or piece of jargon you introduce. Every single time one appears — including the very first mention and any reintroduction after a gap — you MUST do BOTH of the following before moving on:
+1. **Spell out the acronym in full.** Example: don't just say "RAG" — say "RAG, which stands for Retrieval-Augmented Generation". Don't just say "LLM" — say "LLM, 也就是 Large Language Model, 大语言模型". Don't just say "MoE" — say "MoE, Mixture of Experts, 专家混合模型". This applies to EVERY acronym, no matter how common you think it is (RAG, LLM, MoE, RLHF, DPO, LoRA, PEFT, CoT, KV cache, FLOPs, TPU, GPU, CUDA, API, SDK, etc.). If the term has a widely-used Chinese translation, include it too.
+2. **Explain what it means in plain language.** One or two sentences describing what the thing actually is, what problem it solves, or what role it plays. Not just the expansion — the meaning. Example: "RAG, Retrieval-Augmented Generation — 就是在模型回答问题之前, 先去一个外部知识库里检索相关资料, 再把检索到的内容和原始问题一起喂给模型, 让它基于这些资料来生成答案. 好处是可以让模型回答它训练数据里没有的、或者最新的信息."
+3. **Do NOT chain multiple unexplained terms together.** If a definition itself contains another unfamiliar term, stop and explain that term too before continuing. Build vocabulary one layer at a time.
+4. **Proper nouns (product names, library names, paper names, person names) get the same treatment** — say what it is, who made it, and why it matters, the first time it comes up. Example: don't just say "vLLM" — say "vLLM, 这是一个由 UC Berkeley 团队开源的 LLM 推理引擎, 主要解决的是高并发场景下显存利用率低的问题."
+5. **When in doubt, over-explain rather than under-explain.** A listener who already knows the term will not be annoyed by a 5-second refresher, but a listener who doesn't know it will be completely lost and tune out. Err on the side of accessibility.
+The second host should also actively flag this: if the first host uses a term without defining it, the second host interrupts with "等一下, {host0}, 你刚才说的 XXX 是什么意思? 我们先把这个讲清楚." Treat these interruptions as a feature, not friction — they mirror the listener's own confusion and make the episode genuinely educational.
+
 HOST INTRODUCTION (first 10-15 seconds of dialogue):
 Open with a warm, natural self-introduction. Example shape:
   {host0}: "Hi 大家好, 欢迎收听全栈AI, 我是{host0}."
@@ -28,8 +37,8 @@ EPISODE FLOW:
 - After the hook, briefly preview the topic: what it is, why it matters, and what aspects of it the episode will explore.
 - Follow an easy-to-hard progression through the topic, building knowledge layer by layer:
   1. Start with what it is in plain, jargon-free language that anyone can follow. Use an analogy. Be precise about categories — say whether something is a framework, a library, a protocol, an algorithm, a technique, etc. The goal is that a listener hearing this concept for the first time walks away with a solid mental model before any technical depth is added.
-  2. Define key vocabulary. Explain the problem it solves and why older approaches fell short. For every acronym or named term, spell out the full form. Proactively compare with similar or easily confused terms.
-  3. Go deeper into the mechanics — architecture, algorithms, how it actually works under the hood. Stay rigorous but accessible. IMPORTANT: Before introducing any technical term, stop and explain it first. Never assume the audience already knows a term — define it, give context for why it exists, then use it. If a deep-dive section depends on multiple technical terms, build them up one by one before combining them.
+  2. Define key vocabulary. Explain the problem it solves and why older approaches fell short. Apply the TECHNICAL TERMS rule above to every acronym, named term, and proper noun — spell out the full form AND explain what it actually means in plain language, every time. Proactively compare with similar or easily confused terms so the listener can tell them apart.
+  3. Go deeper into the mechanics — architecture, algorithms, how it actually works under the hood. Stay rigorous but accessible. IMPORTANT: Apply the TECHNICAL TERMS rule above rigorously here — before introducing any technical term, stop and spell out its full form and explain what it means in plain language. Never assume the audience already knows a term, no matter how standard it seems. If a deep-dive section depends on multiple technical terms, build them up one by one, define each, then combine them.
   4. Cover real-world usage: production considerations, scalability, cost, common pitfalls.
   5. Give a growth path: what to learn next, what to try, where to go deeper.
 - When transitioning between subtopics within the main theme, explicitly connect them: "This directly relates to what we just discussed because...", "Now here's where it gets interesting — remember how we said X? Well, Y is the natural next question..."

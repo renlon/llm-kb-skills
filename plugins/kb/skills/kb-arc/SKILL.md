@@ -15,6 +15,31 @@ Archive substantive Q&A from the current conversation (or a historical transcrip
 
 **Executor:** Opus single-pass. No subagents.
 
+## Invocation Context: Claude Code vs Cursor
+
+This skill can be invoked from either Claude Code or Cursor. The destination for the archived lesson depends on which environment is calling it:
+
+- **Claude Code (default):** archived lessons go to `~/Documents/MLL/lessons/` as polished lesson files. They become part of the curated lessons repository — with README indexing, diagrams, and git sync.
+- **Cursor:** archived lessons go to `~/Documents/MLL/raw/lessons/` as raw source material. They will be compiled into the wiki by a later `kb` compile run. Skip the lessons-repo-specific steps (README update, diagram generation, git push of the lessons repo) — raw content is picked up by the compile workflow.
+
+**How to detect Cursor:** check any of the following — if any is true, treat the invocation as Cursor mode:
+
+- Environment variable `CURSOR_TRACE_ID` is set, OR any env var starting with `CURSOR_` is present.
+- The env `TERM_PROGRAM` equals `cursor` or contains `cursor`.
+- The user explicitly states the invocation is from Cursor (e.g., "archive this from cursor", "I'm in cursor", or passes a `--cursor` flag).
+
+Run a quick bash check at the start of Step 0:
+
+```bash
+if [ -n "$CURSOR_TRACE_ID" ] || env | grep -qi '^CURSOR_' || [ "${TERM_PROGRAM:-}" = "cursor" ]; then
+  echo "cursor"
+else
+  echo "claude-code"
+fi
+```
+
+Record the result as the `invocation_context` and reference it throughout the workflow. When in doubt, ask the user once: "Are you running this from Claude Code or Cursor?" — then proceed.
+
 ## Workflow
 
 ### Step 0: Resolve Source
@@ -69,10 +94,19 @@ Cluster the included exchanges into distinct topics.
 
 ### Step 3: Read Existing Lessons
 
-1. Glob `~/Documents/MLL/lessons/*.md`
+Resolve the lessons directory based on `invocation_context`:
+
+- **Claude Code:** `~/Documents/MLL/lessons/`
+- **Cursor:** `~/Documents/MLL/raw/lessons/` (create with `mkdir -p` if missing)
+
+Then:
+
+1. Glob `<lessons_dir>/*.md`
 2. Exclude `README.md`
 3. For each lesson file, read its content to understand what topics and concepts it covers
 4. Build a mental map of: topic area -> file path -> key concepts already documented
+
+For the rest of this document, `<lessons_dir>` refers to this resolved path.
 
 ### Step 4: Match Topics to Existing Lessons
 
@@ -115,7 +149,7 @@ These artifacts are also signals for Step 6 (see "Recreate visual artifacts from
 4. **Q&A Transcript section:** Append only new Q&A exchanges, applying the question clarity rule above. Skip exchanges that cover ground already present in the file.
 5. Rename the file to update the date suffix to today's date using `git mv`. If the existing file has no date suffix, skip the rename and write in place.
 
-Example (substitute actual filename and today's date):
+Example (Claude Code path — for Cursor, substitute `raw/lessons/` for `lessons/`):
 
 ```bash
 cd ~/Documents/MLL
@@ -124,13 +158,15 @@ git mv "lessons/KV_Cache_and_Attention_Mechanisms_2026-04-07.md" "lessons/KV_Cac
 
 #### 5b: No Match -- Create New Lesson
 
-Create a new file at `~/Documents/MLL/lessons/Topic_Name_YYYY-MM-DD.md` using today's date.
+Create a new file at `<lessons_dir>/Topic_Name_YYYY-MM-DD.md` using today's date. Per Step 3, `<lessons_dir>` is `~/Documents/MLL/lessons/` for Claude Code invocations and `~/Documents/MLL/raw/lessons/` for Cursor invocations.
 
 **File format:** Read the template from `prompts/lesson-format.md` relative to this skill's directory. Use it as the structure for new lesson files.
 
 ### Step 6: Generate Diagrams
 
-**This step is mandatory.** Generate a diagram for every lesson file written or updated in Step 5. Do not skip this step based on subjective judgment about whether the content "needs" a diagram — every lesson gets one.
+**Cursor mode: skip this step entirely.** Raw lessons in `~/Documents/MLL/raw/lessons/` are source material — diagrams are generated later by the `kb` compile workflow when it ingests this content into the wiki. Go directly to Step 7.
+
+**Claude Code mode: this step is mandatory.** Generate a diagram for every lesson file written or updated in Step 5. Do not skip this step based on subjective judgment about whether the content "needs" a diagram — every lesson gets one.
 
 **Only skip when ALL of the following are true:**
 - The lesson is under 100 words of technical content AND
@@ -180,7 +216,9 @@ If a lesson is under 100 words and contains only a single isolated definition, l
 
 ### Step 7: Update README.md
 
-Read `~/Documents/MLL/lessons/README.md`. Update the topics table in the `## Topics` section:
+**Cursor mode: skip this step entirely.** `raw/lessons/` has no curated README index — it is raw source material for later compilation. Go directly to Step 8.
+
+**Claude Code mode:** Read `~/Documents/MLL/lessons/README.md`. Update the topics table in the `## Topics` section:
 
 - For renamed files (merged lessons): update the filename in the link and the date column
 - For new lessons: add a new row to the table
@@ -188,16 +226,22 @@ Read `~/Documents/MLL/lessons/README.md`. Update the topics table in the `## Top
 
 ### Step 8: Git Sync
 
+Adjust the `git add` target based on `invocation_context`:
+
+- **Claude Code:** `git add lessons/`
+- **Cursor:** `git add raw/lessons/`
+
 Run these commands in sequence:
 
 ```bash
-cd ~/Documents/MLL && git add lessons/ && git commit -m "<descriptive message>" && git pull --rebase && git push
+cd ~/Documents/MLL && git add <target> && git commit -m "<descriptive message>" && git pull --rebase && git push
 ```
 
 **Commit message format:**
 - Single new lesson: `Add lesson: Topic Name`
 - Single updated lesson: `Update lesson: Topic Name`
 - Multiple lessons: `Archive session: Topic1, Topic2`
+- Cursor mode: prefix with `raw:` — e.g., `raw: Add lesson: Topic Name`
 
 No confirmation needed for any git operation. If `git pull --rebase` or `git push` fails, report the error to the user and stop. Do not retry or force-push.
 
@@ -205,18 +249,20 @@ No confirmation needed for any git operation. If `git pull --rebase` or `git pus
 
 Report to the user:
 
+- The detected `invocation_context` (Claude Code or Cursor) and therefore which directory the lesson was written to
 - Which topics were archived
 - For each topic: whether it was merged into an existing lesson or created as new
 - The filenames written (with full paths)
-- Which diagrams were generated (if any), with Obsidian links
+- Which diagrams were generated (if any), with Obsidian links — omit for Cursor mode
 - Git push status
+- **Cursor mode only:** remind the user that the raw lesson will be compiled into the wiki on the next `kb` compile run
 
 ## Edge Cases
 
 - **No substantive Q&A in session:** Report "No teaching content found to archive" and exit at Step 1.
 - **Git push fails:** Report the error. Do not retry or force-push.
 - **Rebase conflicts:** Report the conflict and leave the repo for manual resolution.
-- **Lessons directory missing:** Run `mkdir -p ~/Documents/MLL/lessons` before proceeding.
+- **Lessons directory missing:** Run `mkdir -p <lessons_dir>` before proceeding — use `~/Documents/MLL/lessons` for Claude Code and `~/Documents/MLL/raw/lessons` for Cursor.
 - **README.md missing or has no topics table:** Create the table with the standard structure.
 - **Transcript file not found:** Report "File not found: <path>" and STOP.
 - **Transcript file not .jsonl:** Report "Expected a .jsonl transcript file, got: <extension>" and STOP.
