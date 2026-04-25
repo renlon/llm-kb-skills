@@ -207,7 +207,7 @@ class EpRef:
     def __post_init__(self):
         if not isinstance(self.show, str) or not self.show:
             raise ValueError(f"EpRef.show must be a non-empty string: {self.show!r}")
-        if not isinstance(self.ep, int) or self.ep < 1:
+        if not isinstance(self.ep, int) or isinstance(self.ep, bool) or self.ep < 1:
             raise ValueError(f"EpRef.ep must be a positive int: {self.ep!r}")
 
     def to_dict(self) -> dict:
@@ -230,7 +230,7 @@ class EpRef:
         ep = d.get("ep")
         if not isinstance(show, str) or not show:
             raise ValueError(f"EpRef.show must be a non-empty string: {d}")
-        if not isinstance(ep, int) or ep < 1:
+        if not isinstance(ep, int) or isinstance(ep, bool) or ep < 1:
             raise ValueError(f"EpRef.ep must be a positive int: {d}")
         return cls(show=show, ep=ep)
 
@@ -238,6 +238,8 @@ class EpRef:
     def from_legacy(cls, value: Any, *, default_show: str) -> "EpRef":
         """Parse a legacy str 'ep-N' or bare int N as default_show's ref.
         ONLY used by the migrator."""
+        if isinstance(value, bool):
+            raise ValueError(f"legacy ref must be str or int, not bool: {value!r}")
         if isinstance(value, int):
             if value < 1:
                 raise ValueError(f"legacy int ref must be >= 1: {value}")
@@ -270,6 +272,18 @@ def parse_ep_ref_field(value: Any, *, known_shows: set[str]) -> EpRef:
     return ref
 
 
+def _find_show_by_id(shows: list[Show], show_id: str) -> Show:
+    """Linear lookup for an explicit show id. Raises ShowNotFoundError
+    with a helpful 'Available: …' message on miss."""
+    for show in shows:
+        if show.id == show_id:
+            return show
+    available = ", ".join(sorted(s.id for s in shows))
+    raise ShowNotFoundError(
+        f"show {show_id!r} not configured. Available: {available}"
+    )
+
+
 def resolve_show_for_mutation(
     shows: list[Show],
     show_id: str | None,
@@ -282,13 +296,7 @@ def resolve_show_for_mutation(
     - multi-show + explicit → matched (or ShowNotFoundError)
     """
     if show_id is not None:
-        for show in shows:
-            if show.id == show_id:
-                return show
-        available = ", ".join(sorted(s.id for s in shows))
-        raise ShowNotFoundError(
-            f"show {show_id!r} not configured. Available: {available}"
-        )
+        return _find_show_by_id(shows, show_id)
     if len(shows) == 1:
         return shows[0]
     ids = ", ".join(sorted(s.id for s in shows))
@@ -309,13 +317,7 @@ def resolve_show_for_read(
     - multi-show + explicit → matched (or ShowNotFoundError)
     """
     if show_id is not None:
-        for show in shows:
-            if show.id == show_id:
-                return show
-        available = ", ".join(sorted(s.id for s in shows))
-        raise ShowNotFoundError(
-            f"show {show_id!r} not configured. Available: {available}"
-        )
+        return _find_show_by_id(shows, show_id)
     if len(shows) == 1:
         return shows[0]
     return None

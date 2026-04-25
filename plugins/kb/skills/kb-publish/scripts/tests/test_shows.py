@@ -279,3 +279,29 @@ def test_resolve_read_multi_show_no_flag_returns_none():
 def test_resolve_read_multi_show_explicit_selects():
     shows = _make_shows(["a", "b"])
     assert S.resolve_show_for_read(shows, "a").id == "a"
+
+
+def test_resolve_read_single_show_unknown_id():
+    shows = _make_shows(["a"])
+    with pytest.raises(S.ShowNotFoundError):
+        S.resolve_show_for_read(shows, "other")
+
+
+def test_epref_rejects_bool_ep():
+    with pytest.raises(ValueError):
+        S.EpRef(show="x", ep=True)
+
+
+def test_epref_from_dict_rejects_bool_ep():
+    with pytest.raises(ValueError):
+        S.EpRef.from_dict({"show": "x", "ep": True})
+
+
+def test_epref_from_legacy_rejects_bool():
+    with pytest.raises(ValueError):
+        S.EpRef.from_legacy(True, default_show="x")
+
+
+def test_epref_from_legacy_rejects_zero_int():
+    with pytest.raises(ValueError):
+        S.EpRef.from_legacy(0, default_show="x")
