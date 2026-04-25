@@ -67,7 +67,7 @@ If the registry file doesn't exist, initialize it with `episodes: []` and `next_
 
 **Lookup rule:** When `kb-publish` processes an audio file, check if an entry with matching `audio` key already exists. If yes, update that entry (state transition, respecting re-run guard). If no, create a new entry.
 
-### Step 1: Preamble — Read Configuration and Create Staging Directory
+### Step 1: Preamble — Read Configuration, Resolve Show, and Create Staging Directory
 
 1. Read `kb.yaml` from the project root. Look for the `integrations.xiaoyuzhou` section.
 
@@ -80,38 +80,65 @@ If the registry file doesn't exist, initialize it with `episodes: []` and `next_
    - `staging_dir` → `<project_root>/<staging_dir>`
    - `venv_path` is always absolute
 
-5. **Validate required keys:** Verify `podcast_id` and `venv_path` are present and non-null.
+5. **Resolve effective show (MANDATORY — before reading episodes_registry):**
+
+   ```python
+   import sys
+   sys.path.insert(0, '<project_root>/plugins/kb/skills/kb-publish/scripts')
+   from shows import load_shows, resolve_show_for_mutation
+   from shows import ShowMismatchError
+
+   kb_data = <parsed kb.yaml dict>
+   shows = load_shows(kb_data, project_root=project_root)
+
+   # If the sidecar manifest has a "show:" field AND --show was given AND they differ → error.
+   sidecar_show_id = sidecar.get('show') if sidecar else None
+   if sidecar_show_id and args.show and sidecar_show_id != args.show:
+       raise ShowMismatchError(
+           f"sidecar show={sidecar_show_id!r} conflicts with --show={args.show!r}"
+       )
+
+   # Prefer sidecar's show field; fall back to --show flag; fall back to resolver default.
+   effective_show_id = sidecar_show_id or args.show
+   show = resolve_show_for_mutation(shows, effective_show_id)
+
+   # Registry path is now sourced from the resolved show, not from kb.yaml directly.
+   registry_path = Path(show.episodes_registry)
+   ```
+
+   **`--show` flag:** optional for single-show KBs; required for multi-show KBs.
+
+6. **Validate required keys:** Verify `podcast_id` and `venv_path` are present and non-null.
    - If `venv_path` is null/missing → run Setup Step S2
-   - If `podcast_id` is missing → ask user for it
+   - If `podcast_id` is missing → check `show.xiaoyuzhou.podcast_id`; if also missing → ask user for it
 
-6. **Backfill defaults:** If `integrations.gemini` section is missing, treat as `gemini_available = false`.
+7. **Backfill defaults:** If `integrations.gemini` section is missing, treat as `gemini_available = false`.
 
-7. **Determine mode** from user input. Default: `draft`. Accept `--mode draft` or `--mode publish`.
+8. **Determine mode** from user input. Default: `draft`. Accept `--mode draft` or `--mode publish`.
 
-8. **Create run staging directory:**
+9. **Create run staging directory:**
    ```
    <staging_dir>/<YYYYMMDD-HHMMSS>-episode/
    ```
    Create with `mkdir -p`. This is `run_staging_dir`. Rename the slug after title is confirmed in Step 4.
 
-9. **Determine cover generation capability:**
-   - `integrations.gemini.enabled: false` → `gemini_available = false`
-   - `GEMINI_API_KEY` env var not set → warn "GEMINI_API_KEY not found, cover generation unavailable." → `gemini_available = false`
-   - Otherwise → `gemini_available = true`
+10. **Determine cover generation capability:**
+    - `integrations.gemini.enabled: false` → `gemini_available = false`
+    - `GEMINI_API_KEY` env var not set → warn "GEMINI_API_KEY not found, cover generation unavailable." → `gemini_available = false`
+    - Otherwise → `gemini_available = true`
 
-10. **Verify venv and dependencies:**
+11. **Verify venv and dependencies:**
     ```bash
     source "<venv_path>/bin/activate" && python3 -c "import google.genai; import playwright.sync_api; import yaml; print('OK')" && python3 -c "from playwright.sync_api import sync_playwright; p=sync_playwright().start(); b=p.chromium.launch(headless=True); b.close(); p.stop(); print('Chromium OK')"
     ```
     If this fails → run Setup Step S2 automatically.
 
-11. **Read episode registry:**
-    Read the file at `integrations.xiaoyuzhou.episodes_registry` (default: `episodes.yaml` at
-    project root, alongside `kb.yaml`).
+12. **Read episode registry:**
+    Read the file at `registry_path` (resolved from `show.episodes_registry` in step 5 above).
     If the file doesn't exist, initialize with `episodes: []` and `next_id: 1`.
     Record `current_episodes` list and `next_episode_id`.
 
-12. **Resolve browser data path:**
+13. **Resolve browser data path:**
     Read `integrations.xiaoyuzhou.browser_data` (default: `.xiaoyuzhou-browser-data`).
     Resolve relative to project root. This directory stores Playwright persistent context
     (cookies + localStorage + sessionStorage). Login is only needed on first run.
@@ -136,12 +163,15 @@ Do NOT proceed to upload.
 If found:
 1. Read the sidecar manifest.
 2. **Validate:** confirm `manifest.audio == basename(audio_path)`. If mismatch, warn and skip import.
-3. Check if a registry entry with matching `audio` key already exists.
-4. If existing entry has `status: published`: skip import (entry is frozen). Log warning.
-5. If existing entry has `status: generated` or `draft`: merge any fields from the sidecar that are currently null/empty. This includes the new post-processing fields (`intro_applied`, `hosts`, `transcript.*`) — preserve them on the registry entry even though `kb-publish` does not interpret their values.
-6. If no existing entry: create a schema-complete entry with `status: generated`, `id: null`, `title: null`, `description: null`, `date: null`, all content manifest fields from the sidecar (`topic`, `depth`, `concepts_covered`, `open_threads`, `source_lessons`, `notebook_id`), AND the new post-processing fields from the sidecar (pass through opaquely): `intro_applied`, `hosts`, and the nested `transcript` object (`vtt`, `markdown`, `applied`, `speaker_count`). Treat these as opaque — `kb-publish` does not interpret their values.
-7. Write the registry atomically (write to temp file, rename).
-8. Delete the sidecar file only after successful registry write.
+3. **Preserve `show` field:** The sidecar may contain a `show: <id>` field (added by kb-notebooklm).
+   Carry this `show` value forward — it is the source of truth for which show this audio belongs to.
+   The `effective_show_id` resolved in Step 1 already incorporates it (Step 1 step 5 reads `sidecar.get('show')`).
+4. Check if a registry entry with matching `audio` key already exists.
+5. If existing entry has `status: published`: skip import (entry is frozen). Log warning.
+6. If existing entry has `status: generated` or `draft`: merge any fields from the sidecar that are currently null/empty. This includes the `show` field AND the post-processing fields (`intro_applied`, `hosts`, `transcript.*`) — preserve them on the registry entry even though `kb-publish` does not interpret their values.
+7. If no existing entry: create a schema-complete entry with `status: generated`, `id: null`, `title: null`, `description: null`, `date: null`, all content manifest fields from the sidecar (`topic`, `depth`, `concepts_covered`, `open_threads`, `source_lessons`, `notebook_id`), the `show` field from the sidecar (pass through), AND the post-processing fields (pass through opaquely): `intro_applied`, `hosts`, and the nested `transcript` object (`vtt`, `markdown`, `applied`, `speaker_count`). Treat these as opaque — `kb-publish` does not interpret their values.
+8. Write the registry atomically (write to temp file, rename).
+9. Delete the sidecar file only after successful registry write.
 
 ### Step 3: Analyze Content for Title/Description
 
@@ -337,11 +367,34 @@ Based on the JSON result:
 请打开以下链接手动上传: <dashboard_url>
 ```
 
+### Mutation Lock
+
+All steps that write to `episodes.yaml`, `wiki/episodes/<show>/`, or sidecar manifests MUST
+hold the KB-wide mutation lock. Acquire it before ANY write and release on exit:
+
+```python
+import sys
+sys.path.insert(0, '<project_root>/plugins/kb/skills/kb-publish/scripts')
+from lock import kb_mutation_lock
+
+# Wraps Step 2b (sidecar import write), Step 8b (registry write), Step 8c (wiki index write):
+with kb_mutation_lock(project_root, command=f"kb-publish {subcommand}"):
+    # ... all disk mutations ...
+    pass
+```
+
+The lock file is `<project_root>/.kb-mutation.lock`. If another process holds it,
+`LockBusyError` is raised after `timeout` seconds (default 5.0 s). Report to the user:
+"Another KB operation is in progress. Please wait and retry."
+
+**Backfill-index** also acquires the lock before writing wiki files and registry entries
+(this is already wired in `backfill_index.py` via `kb_mutation_lock`).
+
 ### Step 8b: Update Episode Registry
 
-**On success, update the episode registry:**
+**On success, update the episode registry (inside mutation lock — see above):**
 
-1. Read `episodes.yaml`.
+1. Read `episodes.yaml` (path from `show.episodes_registry`).
 2. Look for an existing entry with matching `audio` key.
 3. **If entry exists with `status: published`** (re-run guard):
    - Log warning: "Episode already published as EP{id}. Registry not modified."
@@ -379,11 +432,11 @@ After step 8b's registry update succeeds, index the episode into the wiki. This 
 - Log: "Skipping episode indexing — no transcript available (transcript.applied is false/null). Retry with `/kb-publish backfill-index --episode <N>`."
 - Return. Episode remains published successfully.
 
-**Index pipeline:** Delegate to `backfill_index.backfill_episode()` (imported from `plugins/kb/skills/kb-publish/scripts/backfill_index.py`), which calls `orchestrate_episode_index()` from `episode_wiki.py` — the shared helper used by both step 8c and the `/kb-publish backfill-index` subcommand. The full pipeline:
+**Index pipeline:** Delegate to `backfill_index.backfill_episode()` (imported from `plugins/kb/skills/kb-publish/scripts/backfill_index.py`), which calls `orchestrate_episode_index(..., show=show)` from `episode_wiki.py` — the shared helper used by both step 8c and the `/kb-publish backfill-index` subcommand. Pass the resolved `show` object so the indexer scopes all episode wiki reads/writes under `wiki/<show.wiki_episodes_dir>/`. The full pipeline:
 
 1. Read `transcript.markdown` (resolve relative to the audio file's parent directory).
 2. Build concept catalog via `concept_catalog(wiki_dir, include_stubs=True)`. Stubs are included so Haiku canonicalizes to them and avoids duplicate-stub proliferation.
-3. Build recent-episodes context from `wiki/episodes/*.md` via `scan_episode_wiki(wiki_dir, strict=False)` — filtered to the 3 most-recent published episodes plus any whose tags overlap with this episode's tags.
+3. Build recent-episodes context from `wiki/<show.wiki_episodes_dir>/*.md` via `scan_episode_wiki(wiki_dir, show, strict=False)` — filtered to the 3 most-recent published episodes plus any whose tags overlap with this episode's tags.
 4. Call Haiku with the `episode-wiki-extract.md` prompt. Retry once on malformed JSON output.
 5. Validate the JSON response: required keys present, `depth_this_episode` in `{mentioned, explained, deep-dive}`, all slugs pass `validate_slug()`, recompute `existed_before` from the filesystem (not from Haiku's claim).
 6. Compute `depth_delta_vs_past` and `prior_episode_ref` via `compute_depth_deltas()` — coverage_map is built from all episodes EXCLUDING this episode's `episode_id` to prevent self-counting on reindex.
@@ -414,13 +467,22 @@ Use this subcommand to:
 
 ### Shared codepath
 
-`backfill-index` and step 8c both call `orchestrate_episode_index()` from `plugins/kb/skills/kb-publish/scripts/episode_wiki.py`. This is the shared orchestration helper that runs: read transcript → build catalog + context → call Haiku → validate → compute depth deltas → `index_episode_transactional()` → update registry. Neither caller duplicates the pipeline.
+`backfill-index` and step 8c both call `orchestrate_episode_index(..., show=show)` from
+`plugins/kb/skills/kb-publish/scripts/episode_wiki.py`. The resolved `show` object scopes all
+episode wiki reads/writes to `wiki/<show.wiki_episodes_dir>/`. This is the shared orchestration
+helper that runs: read transcript → build catalog + context → call Haiku → validate → compute
+depth deltas → `index_episode_transactional()` → update registry. Neither caller duplicates
+the pipeline.
+
+**Backfill-index resolves the show** by calling `resolve_show_for_mutation(shows, args.show)`
+before iterating over episodes. If `--show` is not provided and the KB has multiple shows,
+`AmbiguousShowError` is raised.
 
 ### Per-episode algorithm
 
 For each episode to process (one or all):
 
-1. Read the episode entry from `episodes.yaml`. Skip unless `status: published`.
+1. Read the episode entry from `episodes.yaml` (path from `show.episodes_registry`). Skip unless `status: published`.
 2. Resolve the audio file: `audio` is a basename. Check (in order) `<notebooklm.output_path>/<audio>`, then `<notebooklm.output_path>/notebooklm/<audio>`. If not found, warn and skip.
 3. **Transcript resolution:**
    - If `transcript.markdown` is set in the registry AND that file exists: use it, proceed to step 4.
@@ -437,16 +499,16 @@ For each episode to process (one or all):
          --model <transcript.model or 'large-v3'> \
          --device <transcript.device or 'auto'> \
          --language <transcript.language or 'zh'> \
-         --title "全栈AI — <episode.topic> (<episode.date>)" \
+         --title "{show.title} — <episode.topic> (<episode.date>)" \
          --json
      ```
      `--vtt-offset-seconds 0` is correct for pre-feature episodes: the delivered audio IS the raw transcribed audio (no intro-music offset). After transcription, patch the registry: set `transcript.applied = true`, `transcript.vtt`, `transcript.markdown`, `transcript.speaker_count`.
 
    **First-run transcription for EP1/EP2 will take ~5–15 min per episode on CPU.** Use `--device cuda` if a GPU is available.
 
-4. Delegate to `backfill_index.backfill_episode(episode_id)`, which calls `orchestrate_episode_index()` — same flow as step 8c steps 2–8 above.
-5. Update `episodes.yaml` for this episode (step 8c step 8).
-6. Print progress line: `EP<N>: [transcribing... done (<duration>). ] Extracting... <count> concepts, <stubs> stubs. Written wiki/episodes/ep-<N>-<slug>.md`
+4. Delegate to `backfill_index.backfill_episode(episode_id, show=show)`, which calls `orchestrate_episode_index(..., show=show)` — same flow as step 8c steps 2–8 above.
+5. Update `episodes.yaml` (at `show.episodes_registry`) for this episode (step 8c step 8).
+6. Print progress line: `EP<N>: [transcribing... done (<duration>). ] Extracting... <count> concepts, <stubs> stubs. Written wiki/<show.wiki_episodes_dir>/ep-<N>-<slug>.md`
 
 ### `--all` behavior
 
