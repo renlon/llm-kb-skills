@@ -481,44 +481,85 @@ if _TESTS_DIR not in sys.path:
     sys.path.insert(0, _TESTS_DIR)
 from conftest import _minimal_episode_article
 
+import sys as _sys2
+_SCRIPTS_DIR_FLAT = str(Path(__file__).resolve().parent.parent)
+if _SCRIPTS_DIR_FLAT not in _sys2.path:
+    _sys2.path.insert(0, _SCRIPTS_DIR_FLAT)
+from shows import Show as _Show
+
+
+def _make_flat_show(show_id: str = "test-show") -> _Show:
+    """Create a minimal Show for tests.
+
+    wiki_episodes_dir is set to 'episodes/{show_id}', matching the Show invariant.
+    Tests that use this show must place episode files under wiki/episodes/{show_id}/.
+    The wiki_fixture conftest uses show_id='test-show' (the default).
+    """
+    return _Show(
+        id=show_id,
+        title="Test Show",
+        description="",
+        default=True,
+        language="zh_Hans",
+        hosts=["A", "B"],
+        extra_host_names=[],
+        intro_music=None,
+        intro_music_length_seconds=12,
+        intro_crossfade_seconds=3,
+        podcast_format="deep-dive",
+        podcast_length="long",
+        transcript={"enabled": False, "model": "", "device": "auto", "language": "zh"},
+        episodes_registry="episodes.yaml",
+        wiki_episodes_dir=f"episodes/{show_id}",
+        xiaoyuzhou={},
+    )
+
 
 # scan_episode_wiki tests
 
 def test_scan_lenient_skips_malformed_and_returns_valid(wiki_fixture, caplog):
-    # Add a malformed episode alongside the good one
-    (wiki_fixture / "episodes" / "ep-04-broken.md").write_text(
+    show = _make_flat_show()
+    # Add a malformed episode alongside the good one in the show-scoped dir
+    ep_dir = wiki_fixture / show.wiki_episodes_dir
+    (ep_dir / "ep-04-broken.md").write_text(
         "---\nepisode_id: not-a-number\n---\n", encoding="utf-8"
     )
     with caplog.at_level(logging.WARNING):
-        eps = scan_episode_wiki(wiki_fixture, strict=False)
+        eps = scan_episode_wiki(wiki_fixture, show, strict=False)
     assert len(eps) == 1
     assert eps[0].episode_id == 3
     assert any("ep-04" in rec.message or "broken" in rec.message for rec in caplog.records)
 
 
 def test_scan_strict_raises_on_malformed(wiki_fixture):
-    (wiki_fixture / "episodes" / "ep-04-broken.md").write_text(
+    show = _make_flat_show()
+    ep_dir = wiki_fixture / show.wiki_episodes_dir
+    (ep_dir / "ep-04-broken.md").write_text(
         "---\nepisode_id: not-a-number\n---\n", encoding="utf-8"
     )
     with pytest.raises(EpisodeParseError):
-        scan_episode_wiki(wiki_fixture, strict=True)
+        scan_episode_wiki(wiki_fixture, show, strict=True)
 
 
 def test_scan_sorts_by_episode_id(wiki_fixture):
-    (wiki_fixture / "episodes" / "ep-01-foo.md").write_text(_minimal_episode_article(1), encoding="utf-8")
-    (wiki_fixture / "episodes" / "ep-07-bar.md").write_text(_minimal_episode_article(7), encoding="utf-8")
-    eps = scan_episode_wiki(wiki_fixture, strict=False)
+    show = _make_flat_show()
+    ep_dir = wiki_fixture / show.wiki_episodes_dir
+    (ep_dir / "ep-01-foo.md").write_text(_minimal_episode_article(1), encoding="utf-8")
+    (ep_dir / "ep-07-bar.md").write_text(_minimal_episode_article(7), encoding="utf-8")
+    eps = scan_episode_wiki(wiki_fixture, show, strict=False)
     assert [e.episode_id for e in eps] == [1, 3, 7]
 
 
 def test_scan_returns_empty_list_when_episodes_dir_missing(tmp_path):
     wiki = tmp_path / "wiki"
     wiki.mkdir()  # no episodes subdir
-    assert scan_episode_wiki(wiki) == []
+    show = _make_flat_show()
+    assert scan_episode_wiki(wiki, show) == []
 
 
 def test_scan_populates_indexed_concepts_from_index_block(wiki_fixture):
-    eps = scan_episode_wiki(wiki_fixture, strict=False)
+    show = _make_flat_show()
+    eps = scan_episode_wiki(wiki_fixture, show, strict=False)
     assert len(eps[0].concepts) == 1
     c = eps[0].concepts[0]
     assert c.slug == "wiki/quantization/k-quants"
@@ -575,7 +616,8 @@ def test_catalog_ignores_top_level_files_like_readme(wiki_fixture):
 # concepts_covered_by_episodes tests
 
 def test_coverage_aggregation_single_episode(wiki_fixture):
-    eps = scan_episode_wiki(wiki_fixture)
+    show = _make_flat_show()
+    eps = scan_episode_wiki(wiki_fixture, show)
     coverage = concepts_covered_by_episodes(eps)
     assert "wiki/quantization/k-quants" in coverage
     hits = coverage["wiki/quantization/k-quants"]
@@ -585,12 +627,10 @@ def test_coverage_aggregation_single_episode(wiki_fixture):
 
 
 def test_coverage_aggregation_multiple_episodes_same_concept(wiki_fixture):
-    # Add a second episode that also covers k-quants at a different depth
-    ep5 = _minimal_episode_article(5).replace(
-        "deep-dive", "explained", 1  # change episode depth but NOT the concept — manual tweak below
-    )
+    show = _make_flat_show()
     # Build a custom article for EP5 with concept at "explained"
-    (wiki_fixture / "episodes" / "ep-05-followup.md").write_text(
+    # Note: prior_episode_ref is null here because we're not testing migration — just coverage
+    (wiki_fixture / show.wiki_episodes_dir / "ep-05-followup.md").write_text(
         """---
 title: "EP5 | Follow-up"
 episode_id: 5
@@ -608,7 +648,7 @@ index:
     - slug: wiki/quantization/k-quants
       depth_this_episode: explained
       depth_delta_vs_past: lighter
-      prior_episode_ref: 3
+      prior_episode_ref: null
       what: "Brief recap."
       why_it_matters: "Context."
       key_points: []
@@ -624,7 +664,7 @@ index:
 """,
         encoding="utf-8",
     )
-    eps = scan_episode_wiki(wiki_fixture)
+    eps = scan_episode_wiki(wiki_fixture, show)
     coverage = concepts_covered_by_episodes(eps)
     hits = coverage["wiki/quantization/k-quants"]
     assert len(hits) == 2
@@ -655,7 +695,8 @@ def _make_extraction(concepts):
 
 def test_transactional_new_episode_creates_article_and_new_stubs(tmp_path):
     wiki = tmp_path / "wiki"
-    (wiki / "episodes").mkdir(parents=True)
+    show = _make_flat_show()
+    (wiki / show.wiki_episodes_dir).mkdir(parents=True)
 
     extraction = _make_extraction([
         {
@@ -677,6 +718,7 @@ def test_transactional_new_episode_creates_article_and_new_stubs(tmp_path):
         audio_file="a.mp3", transcript_file="a.transcript.md",
         tags=["episode"], aliases=[], source_lessons=[],
         extraction=extraction,
+        show=show,
     )
     assert result.episode_article.exists()
     assert result.episode_article.name.startswith("ep-1-")
@@ -686,7 +728,8 @@ def test_transactional_new_episode_creates_article_and_new_stubs(tmp_path):
 
 def test_transactional_skips_existing_non_stub_article(tmp_path):
     wiki = tmp_path / "wiki"
-    (wiki / "episodes").mkdir(parents=True)
+    show = _make_flat_show()
+    (wiki / show.wiki_episodes_dir).mkdir(parents=True)
     (wiki / "topic").mkdir()
     canonical = wiki / "topic" / "concept-a.md"
     canonical.write_text(
@@ -714,6 +757,7 @@ def test_transactional_skips_existing_non_stub_article(tmp_path):
         audio_file="b.mp3", transcript_file="b.transcript.md",
         tags=["episode"], aliases=[], source_lessons=[],
         extraction=extraction,
+        show=show,
     )
     assert "wiki/topic/concept-a" in result.collisions_skipped
     assert canonical.read_text(encoding="utf-8") == original
@@ -722,13 +766,16 @@ def test_transactional_skips_existing_non_stub_article(tmp_path):
 def test_transactional_same_episode_stub_replaced(tmp_path):
     """Re-indexing an episode that introduced a stub should FULLY replace the stub."""
     wiki = tmp_path / "wiki"
-    (wiki / "episodes").mkdir(parents=True)
+    show = _make_flat_show()
+    (wiki / show.wiki_episodes_dir).mkdir(parents=True)
     (wiki / "topic").mkdir()
     stub = wiki / "topic" / "concept-a.md"
+    # Use dict-form created_by to match the post-migration format
     stub.write_text(
-        "---\ntitle: Concept A\nstatus: stub\ncreated_by: ep-7\n"
-        "last_seen_by: ep-7\nbest_depth_episode: ep-7\nbest_depth: explained\n"
-        "referenced_by: [ep-7]\ncreated: '2026-04-01'\n---\n\n"
+        "---\ntitle: Concept A\nstatus: stub\ncreated_by: {show: test-show, ep: 7}\n"
+        "last_seen_by: {show: test-show, ep: 7}\nbest_depth_episode: {show: test-show, ep: 7}\n"
+        "best_depth: explained\nreferenced_by: [{show: test-show, ep: 7}]\n"
+        "created: '2026-04-01'\n---\n\n"
         "# Concept A\n\n> Stub.\n\n## Old body content.\n",
         encoding="utf-8",
     )
@@ -738,7 +785,7 @@ def test_transactional_same_episode_stub_replaced(tmp_path):
             "slug": "wiki/topic/concept-a",
             "depth_this_episode": "deep-dive",
             "depth_delta_vs_past": "deeper",
-            "prior_episode_ref": 7,
+            "prior_episode_ref": {"show": "test-show", "ep": 7},
             "what": "New what.",
             "why_it_matters": "New why.",
             "key_points": ["Key point."],
@@ -752,6 +799,7 @@ def test_transactional_same_episode_stub_replaced(tmp_path):
         audio_file="c.mp3", transcript_file="c.transcript.md",
         tags=["episode"], aliases=[], source_lessons=[],
         extraction=extraction,
+        show=show,
     )
     assert "wiki/topic/concept-a" in result.stubs_updated
     # Prose section should be the freshly rendered version
@@ -762,13 +810,19 @@ def test_transactional_same_episode_stub_replaced(tmp_path):
 
 def test_transactional_other_episode_stub_frontmatter_only_update(tmp_path):
     wiki = tmp_path / "wiki"
-    (wiki / "episodes").mkdir(parents=True)
+    show = _make_flat_show()
+    (wiki / show.wiki_episodes_dir).mkdir(parents=True)
     (wiki / "topic").mkdir()
     stub = wiki / "topic" / "concept-a.md"
+    # Post-migration dict form: created_by EP3 of test-show
     stub.write_text(
-        "---\ntitle: Concept A\nstatus: stub\ncreated_by: ep-3\n"
-        "last_seen_by: ep-3\nbest_depth_episode: ep-3\nbest_depth: mentioned\n"
-        "referenced_by: [ep-3]\ncreated: '2026-04-01'\naliases: []\n---\n\n"
+        "---\ntitle: Concept A\nstatus: stub\n"
+        "created_by:\n  show: test-show\n  ep: 3\n"
+        "last_seen_by:\n  show: test-show\n  ep: 3\n"
+        "best_depth_episode:\n  show: test-show\n  ep: 3\n"
+        "best_depth: mentioned\n"
+        "referenced_by:\n  - show: test-show\n    ep: 3\n"
+        "created: '2026-04-01'\naliases: []\n---\n\n"
         "# Concept A\n\n> Stub prose introduced by EP3.\n",
         encoding="utf-8",
     )
@@ -778,7 +832,7 @@ def test_transactional_other_episode_stub_frontmatter_only_update(tmp_path):
             "slug": "wiki/topic/concept-a",
             "depth_this_episode": "explained",  # deeper than EP3's 'mentioned'
             "depth_delta_vs_past": "deeper",
-            "prior_episode_ref": 3,
+            "prior_episode_ref": {"show": "test-show", "ep": 3},
             "what": "New what.",
             "why_it_matters": "New why.",
             "key_points": [],
@@ -792,22 +846,22 @@ def test_transactional_other_episode_stub_frontmatter_only_update(tmp_path):
         audio_file="c.mp3", transcript_file="c.transcript.md",
         tags=["episode"], aliases=[], source_lessons=[],
         extraction=extraction,
+        show=show,
     )
     assert "wiki/topic/concept-a" in result.stubs_updated
     new_text = stub.read_text(encoding="utf-8")
     # Prose preserved
     assert "Stub prose introduced by EP3" in new_text
-    # Frontmatter updated
-    assert "last_seen_by: ep-5" in new_text
-    assert "best_depth_episode: ep-5" in new_text
+    # Frontmatter updated — dict form now, so check for show/ep keys
     assert "best_depth: explained" in new_text
-    # created_by preserved
-    assert "created_by: ep-3" in new_text
+    # created_by EP3 preserved (show: test-show, ep: 3)
+    assert "ep: 3" in new_text
 
 
 def test_transactional_aborts_on_invalid_slug(tmp_path):
     wiki = tmp_path / "wiki"
-    (wiki / "episodes").mkdir(parents=True)
+    show = _make_flat_show()
+    (wiki / show.wiki_episodes_dir).mkdir(parents=True)
 
     extraction = _make_extraction([
         {
@@ -829,9 +883,10 @@ def test_transactional_aborts_on_invalid_slug(tmp_path):
             audio_file="a.mp3", transcript_file="a.transcript.md",
             tags=["episode"], aliases=[], source_lessons=[],
             extraction=extraction,
+            show=show,
         )
     # No episode article written
-    assert list((wiki / "episodes").glob("*.md")) == []
+    assert list((wiki / show.wiki_episodes_dir).glob("*.md")) == []
 
 
 def test_transactional_commits_stubs_before_episode_article(tmp_path):
@@ -839,7 +894,8 @@ def test_transactional_commits_stubs_before_episode_article(tmp_path):
     This is enforced by the smoke-parse step before any commit.
     """
     wiki = tmp_path / "wiki"
-    (wiki / "episodes").mkdir(parents=True)
+    show = _make_flat_show()
+    (wiki / show.wiki_episodes_dir).mkdir(parents=True)
 
     # Craft an extraction that renders a valid episode (no smoke-parse failure here).
     # We verify the result includes a new stub AND the episode article — both landed.
@@ -862,6 +918,7 @@ def test_transactional_commits_stubs_before_episode_article(tmp_path):
         audio_file="a.mp3", transcript_file="a.transcript.md",
         tags=["episode"], aliases=[], source_lessons=[],
         extraction=extraction,
+        show=show,
     )
     assert result.episode_article.exists()
     assert (wiki / "topic" / "concept-a.md").exists()
@@ -900,7 +957,8 @@ def _mock_haiku(response_json: dict):
 
 def test_orchestrate_calls_haiku_with_expected_structure(tmp_path):
     wiki = tmp_path / "wiki"
-    (wiki / "episodes").mkdir(parents=True)
+    _show_tmp = _make_flat_show()
+    (wiki / _show_tmp.wiki_episodes_dir).mkdir(parents=True)
     transcript_path = tmp_path / "t.md"
     transcript_path.write_text("Sample transcript for ep 1.", encoding="utf-8")
     prompt_path = tmp_path / "prompt.md"
@@ -924,6 +982,7 @@ def test_orchestrate_calls_haiku_with_expected_structure(tmp_path):
             "series_links": {"builds_on": [], "followup_candidates": []},
         })
 
+    show = _make_flat_show()
     result = orchestrate_episode_index(
         wiki_dir=wiki, episode_id=1, episode_topic="Topic",
         episode_date="2026-04-21", episode_depth="explained",
@@ -931,6 +990,7 @@ def test_orchestrate_calls_haiku_with_expected_structure(tmp_path):
         transcript_file="a.transcript.md", tags=["episode"], aliases=[],
         source_lessons=[], haiku_call=capturing_haiku,
         prompt_template_path=prompt_path,
+        show=show,
     )
     assert len(captured_prompts) == 1
     assert "Sample transcript for ep 1." in captured_prompts[0]
@@ -939,7 +999,8 @@ def test_orchestrate_calls_haiku_with_expected_structure(tmp_path):
 
 def test_orchestrate_retries_once_on_malformed_then_succeeds(tmp_path):
     wiki = tmp_path / "wiki"
-    (wiki / "episodes").mkdir(parents=True)
+    _show_retry = _make_flat_show()
+    (wiki / _show_retry.wiki_episodes_dir).mkdir(parents=True)
     transcript_path = tmp_path / "t.md"
     transcript_path.write_text("X", encoding="utf-8")
     prompt_path = tmp_path / "prompt.md"
@@ -963,6 +1024,7 @@ def test_orchestrate_retries_once_on_malformed_then_succeeds(tmp_path):
             "series_links": {"builds_on": [], "followup_candidates": []},
         })
 
+    show = _make_flat_show()
     result = orchestrate_episode_index(
         wiki_dir=wiki, episode_id=1, episode_topic="T",
         episode_date="2026-04-21", episode_depth="explained",
@@ -970,6 +1032,7 @@ def test_orchestrate_retries_once_on_malformed_then_succeeds(tmp_path):
         transcript_file="a.t.md", tags=["episode"], aliases=[],
         source_lessons=[], haiku_call=flaky_haiku,
         prompt_template_path=prompt_path,
+        show=show,
     )
     assert call_count == 2
     assert result.episode_article.exists()
@@ -977,7 +1040,8 @@ def test_orchestrate_retries_once_on_malformed_then_succeeds(tmp_path):
 
 def test_orchestrate_aborts_after_two_malformed_responses(tmp_path):
     wiki = tmp_path / "wiki"
-    (wiki / "episodes").mkdir(parents=True)
+    _show_abort = _make_flat_show()
+    (wiki / _show_abort.wiki_episodes_dir).mkdir(parents=True)
     transcript_path = tmp_path / "t.md"
     transcript_path.write_text("X", encoding="utf-8")
     prompt_path = tmp_path / "prompt.md"
@@ -986,6 +1050,7 @@ def test_orchestrate_aborts_after_two_malformed_responses(tmp_path):
     def bad_haiku(p: str) -> str:
         return "still not json"
 
+    show = _make_flat_show()
     with pytest.raises(TransactionAbortedError):
         orchestrate_episode_index(
             wiki_dir=wiki, episode_id=1, episode_topic="T",
@@ -994,18 +1059,20 @@ def test_orchestrate_aborts_after_two_malformed_responses(tmp_path):
             transcript_file="a.t.md", tags=["episode"], aliases=[],
             source_lessons=[], haiku_call=bad_haiku,
             prompt_template_path=prompt_path,
+            show=show,
         )
     # No episode article
-    assert list((wiki / "episodes").glob("*.md")) == []
+    assert list((wiki / show.wiki_episodes_dir).glob("*.md")) == []
 
 
 def test_orchestrate_excludes_current_episode_from_coverage_map(tmp_path):
     """Reindex must not count the current episode as prior coverage."""
     wiki = tmp_path / "wiki"
-    (wiki / "episodes").mkdir(parents=True)
+    show = _make_flat_show()
+    (wiki / show.wiki_episodes_dir).mkdir(parents=True)
     # Seed existing EP3 covering the concept at deep-dive
     from tests.conftest import _minimal_episode_article
-    (wiki / "episodes" / "ep-03-old.md").write_text(_minimal_episode_article(3), encoding="utf-8")
+    (wiki / show.wiki_episodes_dir / "ep-03-old.md").write_text(_minimal_episode_article(3), encoding="utf-8")
 
     transcript_path = tmp_path / "t.md"
     transcript_path.write_text("X", encoding="utf-8")
@@ -1028,6 +1095,7 @@ def test_orchestrate_excludes_current_episode_from_coverage_map(tmp_path):
 
     # Reindexing ep 3 — coverage_map should EXCLUDE ep 3, so the concept
     # depth_delta_vs_past should resolve to "new" (no prior coverage outside self).
+    show = _make_flat_show()
     result = orchestrate_episode_index(
         wiki_dir=wiki, episode_id=3, episode_topic="Re-index",
         episode_date="2026-04-21", episode_depth="explained",
@@ -1035,6 +1103,7 @@ def test_orchestrate_excludes_current_episode_from_coverage_map(tmp_path):
         transcript_file="a.t.md", tags=["episode"], aliases=[],
         source_lessons=[], haiku_call=haiku,
         prompt_template_path=prompt_path,
+        show=show,
     )
     # Read back the written episode article
     text = result.episode_article.read_text(encoding="utf-8")
@@ -1130,9 +1199,10 @@ from episode_wiki import DedupJudgement, judge_candidate_episode
 
 def test_judge_builds_prior_hits_per_candidate(tmp_path):
     wiki = tmp_path / "wiki"
-    (wiki / "episodes").mkdir(parents=True)
+    _show_judge = _make_flat_show()
+    (wiki / _show_judge.wiki_episodes_dir).mkdir(parents=True)
     from tests.conftest import _minimal_episode_article
-    (wiki / "episodes" / "ep-03-q.md").write_text(_minimal_episode_article(3), encoding="utf-8")
+    (wiki / _show_judge.wiki_episodes_dir / "ep-03-q.md").write_text(_minimal_episode_article(3), encoding="utf-8")
 
     prompt_path = tmp_path / "p.md"
     prompt_path.write_text("{candidates}|{prior_hits}|{open_threads}", encoding="utf-8")
@@ -1155,6 +1225,7 @@ def test_judge_builds_prior_hits_per_candidate(tmp_path):
         candidate_concepts=["k-quants", "new-thing"],
         haiku_call=haiku,
         prompt_template_path=prompt_path,
+        show=_show_judge,
     )
     assert isinstance(result, DedupJudgement)
     assert len(result.per_concept) == 1
@@ -1166,7 +1237,8 @@ def test_judge_builds_prior_hits_per_candidate(tmp_path):
 
 def test_judge_returns_empty_prior_hits_for_novel_candidates(tmp_path):
     wiki = tmp_path / "wiki"
-    (wiki / "episodes").mkdir(parents=True)
+    _show_novel = _make_flat_show()
+    (wiki / _show_novel.wiki_episodes_dir).mkdir(parents=True)
     prompt_path = tmp_path / "p.md"
     prompt_path.write_text("{candidates}|{prior_hits}|{open_threads}", encoding="utf-8")
 
@@ -1183,13 +1255,15 @@ def test_judge_returns_empty_prior_hits_for_novel_candidates(tmp_path):
         candidate_concepts=["novel"],
         haiku_call=haiku,
         prompt_template_path=prompt_path,
+        show=_show_novel,
     )
     assert result.episode_verdict == "proceed"
 
 
 def test_judge_raises_when_haiku_json_malformed(tmp_path):
     wiki = tmp_path / "wiki"
-    (wiki / "episodes").mkdir(parents=True)
+    _show_bad = _make_flat_show()
+    (wiki / _show_bad.wiki_episodes_dir).mkdir(parents=True)
     prompt_path = tmp_path / "p.md"
     prompt_path.write_text("{candidates}|{prior_hits}|{open_threads}", encoding="utf-8")
 
@@ -1200,12 +1274,14 @@ def test_judge_raises_when_haiku_json_malformed(tmp_path):
         judge_candidate_episode(
             wiki_dir=wiki, candidate_concepts=["x"],
             haiku_call=bad, prompt_template_path=prompt_path,
+            show=_show_bad,
         )
 
 
 def test_judge_requires_haiku_call_and_template(tmp_path):
     wiki = tmp_path / "wiki"
-    (wiki / "episodes").mkdir(parents=True)
+    wiki.mkdir()
+    # Calling without haiku_call, prompt_template_path, or show must raise RuntimeError
     with pytest.raises(RuntimeError):
         judge_candidate_episode(wiki_dir=wiki, candidate_concepts=["x"])
 

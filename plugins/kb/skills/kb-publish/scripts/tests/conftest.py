@@ -50,9 +50,18 @@ Body.
 """
 
 
+_FIXTURE_SHOW_ID = "test-show"
+
+
 @pytest.fixture
 def wiki_fixture(tmp_path: Path) -> Path:
-    """A small realistic wiki directory with a mix of real articles, stubs, and episode records."""
+    """A small realistic wiki directory with a mix of real articles, stubs, and episode records.
+
+    Episodes are stored under episodes/test-show/ (show-scoped layout) to match
+    the Show invariant (wiki_episodes_dir == 'episodes/{show.id}').
+    Use wiki_fixture_show() to get the matching Show object in tests that call
+    scan_episode_wiki or other Show-aware functions.
+    """
     wiki = tmp_path / "wiki"
     wiki.mkdir()
 
@@ -74,9 +83,11 @@ def wiki_fixture(tmp_path: Path) -> Path:
         encoding="utf-8",
     )
 
-    # Episode article
-    (wiki / "episodes").mkdir()
-    (wiki / "episodes" / "ep-03-quantization.md").write_text(_minimal_episode_article(3), encoding="utf-8")
+    # Episode article — stored under show-scoped subdir
+    (wiki / "episodes" / _FIXTURE_SHOW_ID).mkdir(parents=True)
+    (wiki / "episodes" / _FIXTURE_SHOW_ID / "ep-03-quantization.md").write_text(
+        _minimal_episode_article(3), encoding="utf-8"
+    )
 
     # Non-episode markdown that must be ignored by scan_episode_wiki
     (wiki / "README.md").write_text("# Wiki\n", encoding="utf-8")
