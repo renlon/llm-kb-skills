@@ -548,6 +548,7 @@ def render_episode_wiki(
     tags: list[str],
     aliases: list[str] | None = None,
     show_id: str = "",
+    wiki_path: Path | None = None,
 ) -> str:
     """Deterministic markdown rendering of an episode index record.
 
@@ -615,11 +616,12 @@ def render_episode_wiki(
         audio_file=audio_file,
         transcript_file=transcript_file,
         summary=summary,
-        concepts=concepts,
+        concepts=normalized_concepts,
         open_threads=open_threads,
-        builds_on=series_builds_on,
+        builds_on=normalized_builds_on,
         followups=series_followup_candidates,
         show_id=show_id,
+        wiki_path=wiki_path,
     )
     return "---\n" + yaml.safe_dump(fm, allow_unicode=True, sort_keys=False) + "---\n\n" + body
 
@@ -636,6 +638,7 @@ def _render_body(
     builds_on: list[Any],
     followups: list[str],
     show_id: str = "",
+    wiki_path: Path | None = None,
 ) -> str:
     """Render the human-readable markdown body below the frontmatter."""
     parts: list[str] = []
@@ -685,10 +688,23 @@ def _render_body(
         parts.append("## Series Links\n\n")
         for b in builds_on:
             if isinstance(b, dict):
-                # New dict form — build wikilink from show+ep
+                # New dict form — look up the slug on disk via wiki_path if provided;
+                # otherwise fall back to the stub path (Obsidian won't match it
+                # exactly but it's the best we can do without disk access).
                 show = b.get("show", show_id)
                 ep = b.get("ep", "")
-                parts.append(f"- Builds on: [[wiki/episodes/{show}/ep-{ep}]]\n")
+                stem = None
+                if wiki_path is not None and show and ep:
+                    try:
+                        episodes_dir = wiki_path / "episodes" / show
+                        matches = list(episodes_dir.glob(f"ep-{ep}-*.md"))
+                        if matches:
+                            stem = f"wiki/episodes/{show}/{matches[0].stem}"
+                    except Exception:
+                        pass
+                if stem is None:
+                    stem = f"wiki/episodes/{show}/ep-{ep}"
+                parts.append(f"- Builds on: [[{stem}]]\n")
             else:
                 parts.append(f"- Builds on: [[{b}]]\n")
         for f in followups:
@@ -1053,6 +1069,7 @@ def index_episode_transactional(
             tags=tags,
             aliases=aliases,
             show_id=show_id,
+            wiki_path=wiki_dir,
         )
         (staging / ep_dir_rel / ep_article_basename).write_text(ep_md, encoding="utf-8")
 
