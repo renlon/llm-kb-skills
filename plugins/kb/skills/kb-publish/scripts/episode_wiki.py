@@ -558,13 +558,40 @@ def render_episode_wiki(
     series_builds_on: list of {show, ep} dicts (or legacy strings for compat).
     All episode-level refs emitted as {show, ep} dicts when show_id is provided.
     """
+    # Coerce any legacy-form EpRefs (bare int, "ep-N" str, "wiki/episodes/ep-N-..." stem)
+    # to canonical {show, ep} dict form. Haiku occasionally emits the legacy stem;
+    # the on-disk representation must always be the dict form post-migration.
+    normalized_builds_on: list[Any] = []
+    if show_id:
+        for b in series_builds_on:
+            if isinstance(b, dict):
+                normalized_builds_on.append(EpRef.from_dict(b).to_dict())
+            else:
+                normalized_builds_on.append(
+                    EpRef.from_legacy(b, default_show=show_id).to_dict()
+                )
+    else:
+        normalized_builds_on = list(series_builds_on)
+
+    normalized_concepts: list[dict] = []
+    for c in concepts:
+        c2 = dict(c)
+        prior = c2.get("prior_episode_ref")
+        if prior is None:
+            c2["prior_episode_ref"] = None
+        elif isinstance(prior, dict):
+            c2["prior_episode_ref"] = EpRef.from_dict(prior).to_dict()
+        elif show_id:
+            c2["prior_episode_ref"] = EpRef.from_legacy(prior, default_show=show_id).to_dict()
+        normalized_concepts.append(c2)
+
     index_block: dict[str, Any] = {
         "schema_version": 1,
         "summary": summary,
-        "concepts": concepts,
+        "concepts": normalized_concepts,
         "open_threads": open_threads,
         "series_links": {
-            "builds_on": series_builds_on,
+            "builds_on": normalized_builds_on,
             "followup_candidates": series_followup_candidates,
         },
     }
