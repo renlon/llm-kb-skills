@@ -236,8 +236,8 @@ class EpRef:
 
     @classmethod
     def from_legacy(cls, value: Any, *, default_show: str) -> "EpRef":
-        """Parse a legacy str 'ep-N' or bare int N as default_show's ref.
-        ONLY used by the migrator."""
+        """Parse a legacy str 'ep-N' or wikilink-stem 'wiki/episodes/ep-N-<slug>'
+        or bare int N as default_show's ref. ONLY used by the migrator."""
         if isinstance(value, bool):
             raise ValueError(f"legacy ref must be str or int, not bool: {value!r}")
         if isinstance(value, int):
@@ -245,9 +245,13 @@ class EpRef:
                 raise ValueError(f"legacy int ref must be >= 1: {value}")
             return cls(show=default_show, ep=value)
         if isinstance(value, str):
-            m = re.match(r"^ep-(\d+)$", value)
+            # Accept either bare 'ep-N' or full wikilink stem 'wiki/episodes/ep-N-<slug>'
+            # (legacy series_links.builds_on often stores the full stem).
+            m = re.match(r"^(?:wiki/episodes/)?ep-(\d+)(?:-.*)?$", value)
             if not m:
-                raise ValueError(f"legacy ref must match 'ep-N': {value!r}")
+                raise ValueError(
+                    f"legacy ref must match 'ep-N' or 'wiki/episodes/ep-N-<slug>': {value!r}"
+                )
             return cls(show=default_show, ep=int(m.group(1)))
         raise ValueError(f"legacy ref must be str or int: {value!r}")
 

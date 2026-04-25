@@ -177,6 +177,18 @@ def test_epref_from_legacy_bare_int():
     assert r.show == "my-show" and r.ep == 5
 
 
+def test_epref_from_legacy_wikilink_stem():
+    """Some legacy series_links.builds_on entries are full wikilink stems."""
+    r = S.EpRef.from_legacy(
+        "wiki/episodes/ep-3-quantization-deep-dive", default_show="quanzhan-ai")
+    assert r.show == "quanzhan-ai" and r.ep == 3
+
+
+def test_epref_from_legacy_wikilink_stem_without_slug():
+    r = S.EpRef.from_legacy("wiki/episodes/ep-7", default_show="x")
+    assert r.show == "x" and r.ep == 7
+
+
 def test_epref_from_legacy_rejects_bad_str():
     with pytest.raises(ValueError):
         S.EpRef.from_legacy("episode-3", default_show="x")
