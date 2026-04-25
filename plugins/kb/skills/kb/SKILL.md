@@ -1,11 +1,11 @@
 ---
 name: kb
-description: "Use when compiling raw sources into the wiki, querying the knowledge base, running health checks or lint on the wiki, evolving or improving wiki coverage, or when user says 'compile', 'update the wiki', 'query', 'lint', 'health check', 'evolve', 'what's missing', or 'suggest improvements'. Also triggers on questions that should be answered from the knowledge base."
+description: "Use when compiling raw sources into the wiki, querying the knowledge base, running health checks or lint on the wiki, evolving or improving wiki coverage, migrating to multi-show format, or when user says 'compile', 'update the wiki', 'query', 'lint', 'health check', 'evolve', 'what's missing', 'suggest improvements', or '/kb migrate'. Also triggers on questions that should be answered from the knowledge base."
 ---
 
 ## Overview
 
-Main operating skill for LLM-maintained knowledge bases. Four workflows: **compile**, **query**, **lint**, **evolve**. All opus-orchestrated with model-aware subagent dispatch.
+Main operating skill for LLM-maintained knowledge bases. Five workflows: **compile**, **query**, **lint**, **evolve**, **migrate**. All opus-orchestrated with model-aware subagent dispatch.
 
 **First action in every invocation:** read `kb.yaml` from the project root. If missing, tell the user to run `kb-init` and stop.
 
@@ -438,6 +438,160 @@ YYYY-MM-DD | diagram | created <concept-slug>.excalidraw | <article name or "fre
 ### Incremental Behavior
 
 Always generates — explicit user request is an override. If a diagram with the same name exists, overwrite it.
+
+## Workflow 6: Migrate to Multi-Show
+
+**Trigger:** `/kb migrate` or `kb migrate` from the user. Use this when an existing
+single-show KB needs to upgrade to the multi-show format (v2.0.0 schema).
+
+### When to Use
+
+Run `/kb migrate` when:
+- The KB was created before multi-show support (v2.0.0) and uses the legacy flat
+  single-show config in `kb.yaml`.
+- `classify_kb_state` (see Detection below) returns `"unmigrated"` or `"partially_migrated"`.
+- `kb-notebooklm` or `kb-publish` raise `MigrationRequiredError` at runtime (they
+  encounter legacy `"ep-N"` string refs instead of `{show, ep}` dict refs).
+
+Do NOT run `/kb migrate` on a KB that has already been migrated (`"fully_migrated"`).
+
+### Detection (classify_kb_state)
+
+Before any migration work, classify the KB state by running:
+
+```bash
+python3 plugins/kb/skills/kb/scripts/migrate_multi_show.py \
+  --show-id <id> --show-title <title> --show-hosts <h1>,<h2> \
+  --classify-only
+```
+
+The tri-state output:
+- **`fully_migrated`** — all episode wikis use `wiki/episodes/<show-id>/ep-N-*.md`
+  paths, all YAML refs are `{show, ep}` dicts, state file is in `shows.<id>.*` format.
+  **No migration needed; exit.**
+- **`partially_migrated`** — some files are in the new layout, others still in the
+  old `wiki/episodes/ep-N-*.md` layout. Use `--resume` to continue a prior run.
+- **`unmigrated`** — legacy layout throughout; full migration needed.
+
+### CLI
+
+```bash
+python3 plugins/kb/skills/kb/scripts/migrate_multi_show.py \
+  --show-id <id> \          # e.g. quanzhan-ai
+  --show-title <title> \    # e.g. "全栈AI"
+  --show-hosts <h1>,<h2> \  # e.g. "瓜瓜龙,海发菜"
+  [--dry-run] \             # simulate only; leaves live tree unchanged
+  [--resume]                # continue an interrupted run from Phase A plan
+```
+
+**`--dry-run`:** Runs Phases A and B only (classification, staging, validation) but does NOT
+commit any changes to the live tree. Prints a full plan of what would change. The user can
+review and re-run without `--dry-run` to execute.
+
+**`--resume`:** Continues a prior run that was interrupted after Phase A. Validates that the
+current `--show-id/title/hosts` flags match the persisted Phase A plan; if they differ,
+raises `ResumeMismatchError`. Also checks for live file drift since the snapshot —
+raises `LiveDriftError` if any live file was modified after the Phase A snapshot.
+
+### Phases
+
+The migration runs in 4 transactional phases:
+
+**Phase A — Plan + Staging + Snapshots:**
+1. Acquires `kb_mutation_lock` (raises `LockBusyError` if another operation is running).
+2. Runs idle-check: refuses to start if any runs or notebooks have `status: pending`
+   in `.notebooklm-state.yaml` (raises `PendingWorkError`).
+3. Classifies the KB state (tri-state).
+4. Builds a migration plan: lists every file to move/rewrite, every YAML ref to update.
+5. Writes staging directory `<project_root>/.kb-migrate-staging/` with the plan JSON
+   and SHA-256 snapshots of every file that will be modified.
+6. Writes plan to `.kb-migrate-staging/phase-a-plan.json` for `--resume` recovery.
+
+**Phase A-bis — Atomic Sidecar Rewrites:**
+1. For each sidecar manifest (`*.manifest.yaml`) and state file that contains legacy
+   `"ep-N"` string refs: rewrites all refs to `{show: <id>, ep: N}` dict form IN PLACE.
+2. Each file is atomically replaced (write to temp, `os.replace`).
+3. On failure, the staging snapshot is intact — `--resume` can redo this phase.
+
+**Phase B — Full Validation:**
+1. Scans all modified files with `scan_episode_wiki(wiki_path, show, strict=True)`.
+2. Calls `validate_body_wikilinks(text, known_shows={show.id})` on every episode article.
+3. Verifies all `{show, ep}` dict refs have valid `show` values in the known-shows set.
+4. Any validation failure aborts the migration; the live tree is UNCHANGED at this point
+   (Phase A-bis wrote in-place, so reverting means restoring from the staging snapshots).
+
+**Phase C — Copy-Then-Verify Commit (atomic):**
+1. For each episode wiki file:
+   - Copy `wiki/episodes/ep-N-<slug>.md` → `wiki/episodes/<show-id>/ep-N-<slug>.md`.
+   - Verify the copy matches the source SHA-256.
+   - Only after all copies pass: delete the originals.
+2. Updates `.notebooklm-state.yaml` to `shows.<id>.*` top-level structure.
+3. Writes a per-entry commit log to `.kb-migrate-staging/commit.log` (one line per file:
+   path, action, SHA-256 before/after).
+4. Removes `.kb-migrate-staging/` on success.
+
+### Safety Guarantees
+
+- **Lock held throughout:** `kb_mutation_lock` is acquired in Phase A and released only
+  after Phase C or on abort — no concurrent mutations are possible.
+- **Idle-check:** Refuses to run if any pending runs/notebooks exist (would corrupt
+  cursor state if they finalize during migration).
+- **`--dry-run` leaves live tree unchanged:** Phases A and B run but Phase C is skipped.
+- **`--resume` is crash-safe:** If the process is killed between phases, re-run with the
+  same flags + `--resume` to continue from Phase A's persisted plan.
+- **Copy-then-verify in Phase C:** New files are written and verified before originals
+  are deleted. A crash mid-Phase-C leaves both old and new files present — `--resume`
+  detects this via `"partially_migrated"` and completes the deletions.
+
+### Escape Hatch
+
+`rollback_migration.py` can undo a completed migration using the Phase A snapshots:
+
+```bash
+python3 plugins/kb/skills/kb/scripts/rollback_migration.py \
+  --staging-dir <project_root>/.kb-migrate-staging \
+  [--dry-run]
+```
+
+**Note:** `rollback_migration.py` is coming in v2.0.0 (Task 23.6). If it does not exist
+yet, the user can manually restore from the Phase A snapshots stored in
+`.kb-migrate-staging/snapshots/`. The commit.log lists every changed file with before/after
+SHA-256 hashes for verification.
+
+### Post-Migration: What Changes
+
+After a successful migration, users should expect:
+
+| Artifact | Before | After |
+|---|---|---|
+| Episode wiki path | `wiki/episodes/ep-N-<slug>.md` | `wiki/episodes/<show-id>/ep-N-<slug>.md` |
+| YAML stub `created_by` | `"ep-3"` | `{show: <id>, ep: 3}` |
+| YAML stub `referenced_by` | `["ep-1", "ep-2"]` | `[{show: <id>, ep: 1}, {show: <id>, ep: 2}]` |
+| Episode article `prior_episode_ref` | `3` or `null` | `{show: <id>, ep: 3}` or `null` |
+| Body wikilinks | `[[wiki/episodes/ep-1-slug]]` | `[[wiki/episodes/<show-id>/ep-1-slug]]` |
+| Sidecar manifests | no `show:` field | gain `show: <id>` at top level |
+| `.notebooklm-state.yaml` | `runs: [...]`, `notebooks: [...]` | `shows: {<id>: {runs: [...], notebooks: [...]}}` |
+| `episodes.yaml` | unchanged schema | unchanged schema (per-show path via `show.episodes_registry`) |
+
+Pre-migration files that were NOT modified by the migration (e.g., raw sources, wiki articles
+outside `wiki/episodes/`) are NOT renamed or moved.
+
+### Invocation Example
+
+```bash
+# Dry run first to review the plan
+python3 plugins/kb/skills/kb/scripts/migrate_multi_show.py \
+  --show-id quanzhan-ai \
+  --show-title "全栈AI" \
+  --show-hosts "瓜瓜龙,海发菜" \
+  --dry-run
+
+# Execute after reviewing
+python3 plugins/kb/skills/kb/scripts/migrate_multi_show.py \
+  --show-id quanzhan-ai \
+  --show-title "全栈AI" \
+  --show-hosts "瓜瓜龙,海发菜"
+```
 
 ## Handling X/Twitter Links
 
