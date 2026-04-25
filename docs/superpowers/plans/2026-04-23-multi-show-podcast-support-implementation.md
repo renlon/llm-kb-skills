@@ -56,6 +56,9 @@ EpRef.wikilink_stem(self, slug: str) -> str
 # episode_wiki.py (updated)
 def scan_episode_wiki(wiki_path: Path, show: Show, *, strict: bool = False) -> list[IndexedEpisode]
 def resolve_episode_wikilink(ref: EpRef, shows_by_id: dict[str, Show], wiki_path: Path) -> str
+  # Looks up the episode file under wiki_path / shows_by_id[ref.show].wiki_episodes_dir /
+  # f"ep-{ref.ep}-*.md" to recover the slug, then returns ref.wikilink_stem(<slug>).
+  # Raises UnknownShowError if ref.show not in shows_by_id, FileNotFoundError if no match.
 def validate_body_wikilinks(text: str, known_shows: set[str]) -> list[str]
   # Returns error strings for legacy [[wiki/episodes/ep-N-...]] patterns and
   # for wikilinks targeting unknown shows. Empty list on success.
@@ -65,8 +68,10 @@ def validate_body_wikilinks(text: str, known_shows: set[str]) -> list[str]
 def kb_mutation_lock(project_root: Path, command: str, *, timeout: float = 5.0):
     """Acquire .kb-mutation.lock; raise LockBusyError on timeout."""
 
-def load_state_file(path: Path) -> dict:
-    """Dual-format: reads legacy flat shape OR new shows.<id>.* shape."""
+def load_state_file(path: Path, *, default_show_id: str) -> dict:
+    """Dual-format: reads legacy flat shape OR new shows.<id>.* shape.
+    `default_show_id` is required because legacy state files have no show
+    dimension — their contents get wrapped under shows.<default_show_id>.*."""
 
 def write_state_file(path: Path, state: dict) -> None:
     """Always writes new format."""
@@ -1584,6 +1589,10 @@ def find_pending_notebooks(state: dict) -> list[dict]:
             if nb.get("status") == "pending":
                 pending.append({"show": sid, **nb})
     return pending
+
+
+class PendingWorkError(RuntimeError):
+    """Idle-check found pending runs or notebooks; migration refused."""
 ```
 
 - [ ] **Step 4: Run tests — all green**
@@ -1628,8 +1637,8 @@ The subagent executing each task pulls the exact test code from the spec (§11 l
 
 - **Goal:** update `scan_episode_wiki` to take `wiki_path` + `Show` (not `wiki_dir`), walk `<wiki_path>/<show.wiki_episodes_dir>`. Add `resolve_episode_wikilink(ref: EpRef, shows_by_id: dict[str, Show], wiki_path: Path) -> str` for generating body wikilinks from an EpRef. Add `validate_body_wikilinks(text: str, known_shows: set[str]) -> list[str]` that returns error strings for any legacy-format `[[wiki/episodes/ep-N-...]]` wikilinks (must use `[[wiki/episodes/<show>/ep-N-...]]`).
 - **Files:** modify `plugins/kb/skills/kb-publish/scripts/episode_wiki.py`; update `plugins/kb/skills/kb-publish/scripts/tests/test_episode_wiki.py`.
-- **Tests to add:** existing tests migrated to new signature; new test: single-show KB finds only that show's episodes; multi-show KB's scan for show A does not leak show B's episodes; `resolve_episode_wikilink` returns `wiki/episodes/<show>/ep-<N>-<slug>` form; `validate_body_wikilinks` flags legacy pattern; `validate_body_wikilinks` passes the new pattern; `validate_body_wikilinks` flags wikilinks to unknown shows.
-- **Implementation:** compute `episodes_dir = wiki_path / show.wiki_episodes_dir`; glob `ep-*.md` there. `resolve_episode_wikilink` just delegates to `ref.wikilink_stem(slug)`. `validate_body_wikilinks` regex-scans `\[\[wiki/episodes/(?:ep-\d+|[a-z][a-z0-9-]*/ep-\d+)`.
+- **Tests to add:** existing tests migrated to new signature; new test: single-show KB finds only that show's episodes; multi-show KB's scan for show A does not leak show B's episodes; `resolve_episode_wikilink` looks up the file on disk and returns `wiki/episodes/<show>/ep-<N>-<slug>`; `resolve_episode_wikilink` raises `UnknownShowError` on unknown show; `resolve_episode_wikilink` raises `FileNotFoundError` when no `ep-<N>-*.md` file exists; `validate_body_wikilinks` flags legacy pattern; `validate_body_wikilinks` passes the new pattern; `validate_body_wikilinks` flags wikilinks to unknown shows.
+- **Implementation:** `scan_episode_wiki`: compute `episodes_dir = wiki_path / show.wiki_episodes_dir`; glob `ep-*.md` there. `resolve_episode_wikilink`: look up `shows_by_id[ref.show]` (raise `UnknownShowError` on miss); glob `wiki_path / show.wiki_episodes_dir / f"ep-{ref.ep}-*.md"`; extract slug from the filename stem (strip `ep-<N>-` prefix); return `ref.wikilink_stem(slug)`. `validate_body_wikilinks` regex-scans `\[\[wiki/episodes/(?:ep-\d+|[a-z][a-z0-9-]*/ep-\d+)` and validates any captured show token against `known_shows`.
 - **Commit:** `feat(kb-publish): scan_episode_wiki/resolve_episode_wikilink/validate_body_wikilinks show-scoped`
 
 ## Task 7: `episode_wiki.py` — `compute_depth_deltas` emits `{show, ep}`, raises `MixedShowCoverageError`
@@ -1682,12 +1691,25 @@ The subagent executing each task pulls the exact test code from the spec (§11 l
 - **Tests:** `pre_migration_kb` fixture → `unmigrated`; partially-migrated fixture (kb.yaml has shows[] but flat episode files remain) → `partially_migrated`; a fully-migrated fixture → `fully_migrated`; import of shows/state/lock from migrate module works via the sibling-path bump.
 - **Commit:** `feat(kb): migrate — detection tri-state classifier`
 
-## Task 14: Migrator — Phase A (plan + staging tree)
+## Task 14: Migrator — Phase A (plan + staging tree + snapshots)
 
-- **Goal:** build staging dir with rewritten kb.yaml, rewritten episode articles, rewritten stubs. No disk writes to live tree.
+- **Goal:** build `<project_root>/.kb-migration/` containing every artifact later phases need. Live tree is untouched.
+- **Required artifacts under `<project_root>/.kb-migration/`:**
+  - `plan.yaml` — `{default_show_id, default_show_title, default_show_hosts, wiki_path, output_path, commit_order: [<relative-path>, ...]}`. `commit_order` is the deterministic order Phase C walks (episode articles → stubs → kb.yaml last).
+  - `staging/kb.yaml` — rewritten with `integrations.shows[0]` populated from the default-show CLI flags.
+  - `staging/wiki/episodes/<show-id>/ep-N-<slug>.md` — every episode article, frontmatter refs converted to dict form.
+  - `staging/wiki/**/<stub>.md` — every stub with dict-form `created_by/last_seen_by/best_depth_episode/referenced_by`.
+  - `staging/.notebooklm-state.yaml` — new-format state file (dual-format loader handles legacy→new; writer re-serializes).
+  - `before/` — snapshots of every live file about to change (episode articles, stubs, kb.yaml, `.notebooklm-state.yaml`, sidecars). Used by Phase A-bis restore and Phase C resume validation.
 - **Files:** modify `migrate_multi_show.py`; tests.
-- **Tests:** fixture KB → staging dir contains kb.yaml with shows[], episode articles at `<staging>/wiki/episodes/<show-id>/`, stubs with dict-form frontmatter.
-- **Commit:** `feat(kb): migrate — Phase A (plan + staging)`
+- **Tests:**
+  - fixture KB → `.kb-migration/staging/kb.yaml` has `shows[0].id == default_show_id`.
+  - `.kb-migration/staging/wiki/episodes/<show-id>/ep-1-<slug>.md` exists and its frontmatter has dict-form `prior_episode_ref` / `series_links.builds_on`.
+  - `.kb-migration/staging/wiki/**/<stub>.md` has dict-form stub frontmatter.
+  - `.kb-migration/staging/.notebooklm-state.yaml` has `shows: { <show-id>: {...} }` top-level.
+  - `.kb-migration/plan.yaml` exists with non-empty `commit_order`, matching the staged tree.
+  - `.kb-migration/before/` contains byte-exact copies of every live file that will be rewritten (snapshot restore test).
+- **Commit:** `feat(kb): migrate — Phase A (plan.yaml + staging + before/ snapshots)`
 
 ## Task 15: Migrator — Phase A-bis (sidecar in-place)
 
@@ -1706,15 +1728,27 @@ The subagent executing each task pulls the exact test code from the spec (§11 l
 ## Task 17: Migrator — Phase C (copy-then-verify commit + commit.log + resume)
 
 - **Goal:** per-entry copy-then-verify to live tree, sha256-fingerprint commit.log, resume after crash via log. kb.yaml committed last.
+- **Strict ordering invariant:** for each flat→nested episode file: (1) copy staged nested file to live `wiki/episodes/<show>/ep-N-<slug>.md`, (2) sha256-verify against staged, (3) append to commit.log, (4) ONLY THEN delete legacy flat `wiki/episodes/ep-N-<slug>.md`. Violating this ordering risks silent data loss.
 - **Files:** modify `migrate_multi_show.py`; tests.
-- **Tests:** happy-path commit; simulate crash between entry N and log append → resume correctly identifies already-committed entries; simulate crash before kb.yaml swap → resume completes it.
+- **Tests:**
+  - happy-path commit (all entries in commit.log, legacy flat files removed, kb.yaml swapped).
+  - crash between entry N's copy+verify and log append → resume detects the already-written live file via fingerprint match and advances past it.
+  - crash BETWEEN nested-copy+log-append AND legacy-delete → resume completes the delete (flat file still present but commit.log shows entry committed).
+  - crash before kb.yaml swap → resume completes it.
+  - **Delete-ordering safety test:** simulate crash INSIDE the nested-copy (file written but verify fails) → legacy flat file must still exist; resume re-copies from staging and never deletes the flat file until the nested copy's sha256 matches.
 - **Commit:** `feat(kb): migrate — Phase C (copy-then-verify commit with resume log)`
 
 ## Task 18: Migrator — CLI + lock + idle-check + dry-run
 
-- **Goal:** wire `main()` argparse with `--show-id`, `--show-title`, `--dry-run`, `--resume`. Acquire `kb_mutation_lock` BEFORE running idle-check (acquire-then-idle-check ordering per spec §6.3). Handle `--dry-run` (skip Phase A-bis + C; validate in-memory only). `ResumeMismatchError` is defined in this module.
+- **Goal:** wire `main()` argparse with `--show-id`, `--show-title`, `--dry-run`, `--resume`. Acquire `kb_mutation_lock` BEFORE running idle-check (acquire-then-idle-check ordering per spec §6.3). Handle `--dry-run` per spec: run Phase A (build `.kb-migration/staging/` + `plan.yaml` + `before/`) and Phase B (validate staged artifacts) — skip Phase A-bis live rewrites and Phase C commits. `ResumeMismatchError` is defined in this module.
 - **Files:** modify `migrate_multi_show.py`; tests.
-- **Tests:** `--dry-run` leaves every live file unchanged (mtime snapshot before/after); lock acquired before any read; idle-check with pending run raises `PendingWorkError`; `--resume` with `show-id` differing from persisted Phase-A plan → `ResumeMismatchError`; SIGINT during Phase C → lock released + partial commit.log remains for resume.
+- **Tests:**
+  - `--dry-run` happy path: `.kb-migration/staging/` exists and is valid; live files have unchanged mtimes (snapshot before/after); no sidecars have been rewritten in-place.
+  - `--dry-run` + intentionally corrupt staging (e.g., legacy str in rewritten stub) → exits non-zero with Phase B errors; live tree still unchanged.
+  - Lock acquired before any read.
+  - Idle-check with pending run raises `PendingWorkError`.
+  - `--resume` with `show-id` differing from persisted `plan.yaml.default_show_id` → `ResumeMismatchError`.
+  - SIGINT during Phase C → lock released + partial commit.log + `.kb-migration/` intact for `--resume`.
 - **Commit:** `feat(kb): migrate — CLI with lock, idle-check, dry-run, resume`
 
 ## Task 19: `kb-notebooklm/SKILL.md` — multi-show edits
