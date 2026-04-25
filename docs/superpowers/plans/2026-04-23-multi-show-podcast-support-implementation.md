@@ -22,7 +22,7 @@ This table locks down the cross-task contracts. Every task MUST honor it. If a t
 
 | Type | Definition | Key invariants |
 |---|---|---|
-| `Show` | frozen dataclass in `shows.py` | `id` matches `^[a-z][a-z0-9\-]{1,31}$`; `wiki_episodes_dir == f"episodes/{id}"` (validated); `title` is non-empty str |
+| `Show` | frozen dataclass in `shows.py` | `id` matches `^[a-z][a-z0-9\-]{0,31}$`; `wiki_episodes_dir == f"episodes/{id}"` (validated); `title` is non-empty str |
 | `EpRef` | frozen dataclass `{show: str, ep: int}` | `show` non-empty; `ep >= 1`; serialized to YAML as `{show, ep}` dict |
 | `ShowConfigError` | ValueError subclass | raised on any validation failure |
 | `ShowNotFoundError` | ShowConfigError subclass | unknown show id |
@@ -195,6 +195,8 @@ The spec is huge but the task graph has clear layers. Build bottom-up:
 
 **Layer 6: version + integration**
 23. Bump plugin.json to 2.0.0; full test suite passes
+23.5. End-to-end smoke test harness (hermetic; no real KB)
+23.6. Rollback safety script (escape hatch)
 24. Live migration on the real KB at `~/Documents/MLL/`
 25. Verify EP3 v2 regenerate works post-migration
 
@@ -582,7 +584,7 @@ from pathlib import Path
 from typing import Any
 
 
-_ID_PATTERN = re.compile(r"^[a-z][a-z0-9\-]{1,31}$")
+_ID_PATTERN = re.compile(r"^[a-z][a-z0-9\-]{0,31}$")
 
 
 class ShowConfigError(ValueError):
@@ -1806,6 +1808,43 @@ The subagent executing each task pulls the exact test code from the spec (§11 l
 - **Files:** modify `plugin.json`.
 - **Tests:** `pytest plugins/kb/skills/*/scripts/tests/ -v` — all pass.
 - **Commit:** `chore: bump kb plugin to 2.0.0 for multi-show support`
+
+## Task 23.5: End-to-end smoke test harness
+
+- **Goal:** provide a single command the user can run that exercises the full pipeline against a synthetic KB in `tmp_path` — no dependency on the real KB, no Bedrock calls, no NotebookLM. This is the "does the whole thing actually work" check before Task 24 touches the real KB.
+- **What it covers:**
+  1. Build a realistic pre-migration fixture KB (flat `wiki/episodes/ep-*.md`, stubs with `created_by: ep-N`, `episodes.yaml`, legacy `.notebooklm-state.yaml`, sample sidecar manifests in `output/notebooklm/`, body wikilinks inside both episode articles and one non-episode wiki note).
+  2. Run `migrate_multi_show --show-id quanzhan-ai --show-title '全栈AI' --project-root <tmp>` end-to-end (Phase A → A-bis → B → C → D).
+  3. Assert post-migration invariants:
+     - `kb.yaml` has `integrations.shows[0].id == "quanzhan-ai"`.
+     - `wiki/episodes/quanzhan-ai/ep-1-*.md` exists with `prior_episode_ref: {show, ep}` dict shape.
+     - No `wiki/episodes/ep-1-*.md` (flat path) remains.
+     - Stubs have `created_by: {show: quanzhan-ai, ep: 1}` dict form.
+     - Body wikilinks were rewritten to `[[wiki/episodes/quanzhan-ai/ep-1-<slug>]]`.
+     - Sidecar manifests gained `show: quanzhan-ai` field.
+     - `.notebooklm-state.yaml` has `shows: {quanzhan-ai: {...}}` top-level shape.
+     - `.kb-mutation.lock` is NOT present (released cleanly).
+     - `.kb-migration/` still present with `commit.log` marking all entries committed.
+  4. `--resume` on the same completed migration is a no-op (exit 0, no changes).
+  5. A deliberately crashed-mid-Phase-C scenario: monkeypatch Phase C to raise after 2 entries → verify `commit.log` has 2 entries, live tree is half-migrated, `--resume` completes cleanly.
+  6. `--dry-run` run against a fresh fixture → staging exists, live tree untouched, mtimes match before+after.
+- **Files:**
+  - Create: `plugins/kb/skills/kb/scripts/tests/test_e2e_migrator.py`
+  - The test itself is hermetic pytest; no LLM calls. It validates the full migrator pipeline end-to-end on realistic fixtures.
+- **How to run:** `pytest plugins/kb/skills/kb/scripts/tests/test_e2e_migrator.py -v -s` — no special flags, no network, no real KB access.
+- **Commit:** `test(kb): end-to-end migrator smoke test`
+
+## Task 23.6: Rollback safety script
+
+- **Goal:** a one-liner script that restores a KB from its `.kb-migration/before/` snapshot if the user wants to undo a migration. Worst-case escape hatch.
+- **Files:**
+  - Create: `plugins/kb/skills/kb/scripts/rollback_migration.py`
+  - Create: `plugins/kb/skills/kb/scripts/tests/test_rollback_migration.py`
+- **CLI:** `python rollback_migration.py --project-root <path> [--yes]`
+- **Behavior:** verify `.kb-migration/before/manifest.yaml` exists; for each entry with `existed_before=true`, restore the file from `before/` to its original path (copy-then-verify sha256 matches `sha256_before`); for each entry with `existed_before=false`, delete the live file at that path if and only if its sha256 matches `sha256_staged` (don't delete anything we didn't write). Restore `kb.yaml` last. On success, rename `.kb-migration/` to `.kb-migration.rolled-back-<timestamp>/` so user can still inspect.
+- **Safety:** acquires `kb_mutation_lock`; refuses if any pending runs/notebooks.
+- **Tests:** happy-path rollback reverts every file; rollback refuses with `LockBusyError` if lock held; rollback-after-partial-migration (only some entries in commit.log) still works correctly.
+- **Commit:** `feat(kb): rollback_migration.py — escape hatch to undo a migration`
 
 ## Task 24: Live migration on real KB
 
