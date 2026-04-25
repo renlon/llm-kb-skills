@@ -77,6 +77,13 @@ def validate_shows(
 
     Raises ShowConfigError on any violation. Reports ALL violations at once
     (not first-failure-only).
+
+    `project_root` and `wiki_path` are accepted but not yet consulted — they
+    are reserved for forthcoming cross-reference checks (e.g. verifying that
+    `wiki_path / show.wiki_episodes_dir` is resolvable, or that
+    `project_root / show.episodes_registry` does not collide with external
+    sources). Callers should always pass real values so the API is stable
+    when those checks land.
     """
     errors: list[str] = []
 
@@ -116,11 +123,6 @@ def validate_shows(
             errors.append(
                 f"shows[{i}].wiki_episodes_dir={wed!r} must equal {expected_wed!r}"
             )
-            continue
-
-        # Escape check (should be impossible given the above, but be defensive)
-        if ".." in wed.split("/") or wed.startswith("/"):
-            errors.append(f"shows[{i}].wiki_episodes_dir must not contain '..' or be absolute")
             continue
 
         # Uniqueness checks
