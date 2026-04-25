@@ -34,6 +34,15 @@ if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
 import episode_wiki as E  # noqa: E402
+from shows import (  # noqa: E402
+    Show,
+    load_shows,
+    resolve_show_for_mutation,
+    AmbiguousShowError,
+    ShowConfigError,
+    ShowNotFoundError,
+)
+from lock import kb_mutation_lock, LockBusyError  # noqa: E402
 
 
 log = logging.getLogger("backfill_index")
@@ -224,6 +233,7 @@ def backfill_episode(
     notebooklm_skill_dir: Path,
     prompt_template_path: Path,
     haiku_call: Callable[[str], str],
+    show: Show | None = None,
 ) -> dict[str, Any]:
     """Backfill index for one episode. Returns a dict with stats for progress logging."""
     ep_id = ep_entry["id"]
@@ -289,6 +299,7 @@ def backfill_episode(
         source_lessons=list(ep_entry.get("source_lessons", []) or []),
         haiku_call=haiku_call,
         prompt_template_path=prompt_template_path,
+        show=show,
     )
     return {
         "ep_id": ep_id,
@@ -307,6 +318,11 @@ def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
     parser = argparse.ArgumentParser(description="Backfill episode index for published episodes.")
     parser.add_argument("--kb-yaml", default="kb.yaml", help="Path to kb.yaml (default: ./kb.yaml)")
+    parser.add_argument(
+        "--show",
+        default=None,
+        help="Show id to operate on. Required when multi-show is configured; inferred for single-show.",
+    )
     grp = parser.add_mutually_exclusive_group(required=True)
     grp.add_argument("--episode", type=int, help="Backfill one specific episode by id")
     grp.add_argument("--all", action="store_true", help="Backfill all published episodes")
@@ -321,6 +337,25 @@ def main(argv: list[str] | None = None) -> int:
         log.error("kb.yaml not found at %s", kb_path)
         return 1
     kb_config = _load_kb_yaml(kb_path)
+    project_root = kb_path.parent
+
+    # Resolve show from multi-show config
+    try:
+        shows = load_shows(kb_config, project_root=project_root)
+        show = resolve_show_for_mutation(shows, args.show)
+    except AmbiguousShowError as e:
+        log.error("Ambiguous show: %s", e)
+        return 2
+    except ShowNotFoundError as e:
+        log.error("Show not found: %s", e)
+        return 2
+    except ShowConfigError as e:
+        log.error(
+            "Show configuration error: %s\n"
+            "If this KB has not been migrated to multi-show format, run `/kb migrate` first.",
+            e,
+        )
+        return 1
 
     nb = kb_config.get("integrations", {}).get("notebooklm", {})
     xy = kb_config.get("integrations", {}).get("xiaoyuzhou", {})
@@ -344,9 +379,9 @@ def main(argv: list[str] | None = None) -> int:
         log.error("Extract prompt template not found at %s", prompt_template_path)
         return 1
 
-    registry_path = Path(xy.get("episodes_registry", "episodes.yaml"))
+    registry_path = Path(show.episodes_registry)
     if not registry_path.is_absolute():
-        registry_path = kb_path.parent / registry_path
+        registry_path = project_root / registry_path
     if not registry_path.is_file():
         log.error("episodes.yaml not found at %s", registry_path)
         return 1
@@ -368,47 +403,54 @@ def main(argv: list[str] | None = None) -> int:
 
     haiku_call = _make_haiku_call()
     ok, failed = 0, 0
-    for ep in targets:
-        try:
-            stats = backfill_episode(
-                ep_entry=ep,
-                kb_config=kb_config,
-                wiki_dir=wiki_dir,
-                output_path=output_path,
-                notebooklm_venv=notebooklm_venv,
-                notebooklm_skill_dir=notebooklm_skill_dir,
-                prompt_template_path=prompt_template_path,
-                haiku_call=haiku_call,
-            )
-            # Update registry
-            # Re-derive extraction for registry update: re-open the just-written article? Cheaper:
-            # reconstruct from the TransactionalIndexResult? We wrote the full index; re-read instead.
-            ep_article = Path(stats["episode_article"])
-            # Parse back to find concepts/open_threads for the registry
-            text = ep_article.read_text(encoding="utf-8")
-            fm_end = text.find("\n---\n", 4)
-            fm = yaml.safe_load(text[4:fm_end])
-            idx = fm.get("index", {})
-            extraction_for_registry = {
-                "concepts": idx.get("concepts", []),
-                "open_threads": idx.get("open_threads", []),
-            }
-            _update_registry_for_episode(
-                registry, ep["id"], extraction_for_registry,
-                stats.get("transcript_vtt"), stats["transcript_md"],
-            )
-            _atomic_write_yaml(registry_path, registry)
 
-            log.info(
-                "EP%d: indexed (transcribed=%s, new_stubs=%d, stubs_updated=%d, collisions_skipped=%d). Article: %s",
-                ep["id"], stats["transcribed"], stats["new_stubs"], stats["stubs_updated"],
-                stats["collisions_skipped"], stats["episode_article"],
-            )
-            ok += 1
-        except Exception as e:
-            log.exception("EP%s backfill failed: %s", ep.get("id"), e)
-            failed += 1
-            continue
+    try:
+        with kb_mutation_lock(project_root, command="backfill-index"):
+            for ep in targets:
+                try:
+                    stats = backfill_episode(
+                        ep_entry=ep,
+                        kb_config=kb_config,
+                        wiki_dir=wiki_dir,
+                        output_path=output_path,
+                        notebooklm_venv=notebooklm_venv,
+                        notebooklm_skill_dir=notebooklm_skill_dir,
+                        prompt_template_path=prompt_template_path,
+                        haiku_call=haiku_call,
+                        show=show,
+                    )
+                    # Update registry
+                    # Re-derive extraction for registry update: re-open the just-written article? Cheaper:
+                    # reconstruct from the TransactionalIndexResult? We wrote the full index; re-read instead.
+                    ep_article = Path(stats["episode_article"])
+                    # Parse back to find concepts/open_threads for the registry
+                    text = ep_article.read_text(encoding="utf-8")
+                    fm_end = text.find("\n---\n", 4)
+                    fm = yaml.safe_load(text[4:fm_end])
+                    idx = fm.get("index", {})
+                    extraction_for_registry = {
+                        "concepts": idx.get("concepts", []),
+                        "open_threads": idx.get("open_threads", []),
+                    }
+                    _update_registry_for_episode(
+                        registry, ep["id"], extraction_for_registry,
+                        stats.get("transcript_vtt"), stats["transcript_md"],
+                    )
+                    _atomic_write_yaml(registry_path, registry)
+
+                    log.info(
+                        "EP%d: indexed (transcribed=%s, new_stubs=%d, stubs_updated=%d, collisions_skipped=%d). Article: %s",
+                        ep["id"], stats["transcribed"], stats["new_stubs"], stats["stubs_updated"],
+                        stats["collisions_skipped"], stats["episode_article"],
+                    )
+                    ok += 1
+                except Exception as e:
+                    log.exception("EP%s backfill failed: %s", ep.get("id"), e)
+                    failed += 1
+                    continue
+    except LockBusyError as e:
+        log.error("Cannot acquire mutation lock: %s", e)
+        return 1
 
     log.info("Backfill complete: %d ok, %d failed", ok, failed)
     return 0 if failed == 0 else 1
