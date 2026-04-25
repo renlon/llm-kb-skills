@@ -1,4 +1,4 @@
-Generate a podcast cover image for the show "全栈AI" (Full-Stack AI).
+Generate a podcast cover image for the show "{show_title}".
 
 **Style requirements (核心风格要求):**
 - 大气 (grand, impressive) — bold visual impact, confident composition, not timid or cluttered
