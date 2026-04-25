@@ -31,16 +31,42 @@ This skill operates in two layers:
 
 **MUST BE THE FIRST ACTION ON EVERY INVOCATION:**
 
-1. **Read configuration:**
+1. **Read configuration and resolve show:**
    Read `kb.yaml`. Check for `integrations.notebooklm` section. If missing or `enabled: false`, report: "NotebookLM integration not enabled in kb.yaml." and STOP.
 
+   **Multi-show resolution (MANDATORY — runs for every subcommand):**
+
+   ```python
+   import sys
+   sys.path.insert(0, '<project_root>/plugins/kb/skills/kb-publish/scripts')
+   from shows import load_shows, resolve_show_for_mutation, resolve_show_for_read
+
+   kb_data = <parsed kb.yaml dict>
+   shows = load_shows(kb_data, project_root=kb_path.parent)
+
+   # Mutating subcommands (podcast, quiz, digest, report, research-audio, cleanup):
+   show = resolve_show_for_mutation(shows, args.show)   # args.show = --show flag or None
+
+   # Read-only subcommands (status, list):
+   show = resolve_show_for_read(shows, args.show)       # may return None in multi-show KBs
+   # If show is None (multi-show + no --show), iterate over all shows for display.
+   ```
+
+   Propagate `show.id`, `show.title`, `show.hosts`, `show.intro_music`, `show.podcast_format`,
+   `show.podcast_length`, `show.language`, `show.episodes_registry`, `show.wiki_episodes_dir`,
+   `show.transcript`, `show.xiaoyuzhou` through the entire workflow. Replace any previously
+   hardcoded single-show config reads with the resolved `show.*` fields.
+
+   **`--show` flag:** every subcommand accepts `--show <id>` (optional for single-show KBs;
+   required for multi-show KBs on all mutating subcommands).
+
    For podcast workflows, also read `integrations.notebooklm.podcast` — new keys supported:
-   - `intro_music`: path to the intro music file (null/missing → no intro music).
-   - `intro_music_length_seconds` (default 12)
-   - `intro_crossfade_seconds` (default 3)
-   - `hosts` (default `["瓜瓜龙", "海发菜"]`)
+   - `intro_music`: path to the intro music file (null/missing → no intro music). Falls back to `show.intro_music` if set.
+   - `intro_music_length_seconds` (default 12); falls back to `show.intro_music_length_seconds`
+   - `intro_crossfade_seconds` (default 3); falls back to `show.intro_crossfade_seconds`
+   - `hosts`: falls back to `show.hosts` (default `["瓜瓜龙", "海发菜"]` if neither is set)
    - `extra_host_names` (default `[]`)
-   - `transcript.enabled` (default `false` when absent — set explicitly by `kb-init`)
+   - `transcript.enabled` (default `false` when absent — set explicitly by `kb-init`); falls back to `show.transcript.enabled`
    - `transcript.model` (default `large-v3`), `transcript.device` (default `auto`), `transcript.language` (default `zh`)
 
 2. **Resolve CLI and venv path:**
@@ -125,33 +151,53 @@ The venv activation is required because `notebooklm login` and browser-based ope
 
 **State file location:** `<project_root>/.notebooklm-state.yaml` (alongside `kb.yaml`)
 
-**State schema:**
-```yaml
-last_podcast:                    # (mtime, path) tuple cursor, or null
-  mtime: "2026-04-12T14:30:00.123456Z"
-  path: "/path/to/last/processed/file.md"
-last_digest: null
-last_quiz: null
+**Loading state (use `load_state_file` — handles both legacy and multi-show format):**
 
-notebooks:                       # tracked for cleanup
-  - id: "notebook-uuid"
-    title: "MLL Podcast 2026-04-12"
-    created: "2026-04-12T14:30:00.123456Z"
-    workflow: podcast
-    status: pending              # pending | completed | failed
+```python
+import sys
+sys.path.insert(0, '<project_root>/plugins/kb/skills/kb-publish/scripts')
+from state import load_state_file
 
-runs:                            # dedup history
-  - workflow: podcast
-    timestamp: "2026-04-12T14:30:00.123456Z"
-    sources_hash: "sha256..."
-    params_hash: "sha256..."
-    artifacts:
-      - type: audio
-        output_files:
-          - /path/to/podcast-2026-04-12.mp3
-        status: completed        # pending | completed | failed
-    notebook_id: "notebook-uuid"
+state = load_state_file(
+    Path('.notebooklm-state.yaml'),
+    default_show_id=show.id,   # required; used to lift legacy flat state into shows.<id>.*
+)
+# state is always in the new multi-show shape: state['shows'][show.id][...]
+show_state = state['shows'][show.id]
 ```
+
+**State schema (new multi-show format):**
+```yaml
+shows:
+  quanzhan-ai:                   # show.id
+    last_podcast:                # (mtime, path) tuple cursor, or null
+      mtime: "2026-04-12T14:30:00.123456Z"
+      path: "/path/to/last/processed/file.md"
+    last_digest: null
+    last_quiz: null
+
+    notebooks:                   # tracked for cleanup
+      - id: "notebook-uuid"
+        title: "{show.title} Podcast 2026-04-12"
+        created: "2026-04-12T14:30:00.123456Z"
+        workflow: podcast
+        status: pending          # pending | completed | failed
+
+    runs:                        # dedup history
+      - workflow: podcast
+        timestamp: "2026-04-12T14:30:00.123456Z"
+        sources_hash: "sha256..."
+        params_hash: "sha256..."
+        artifacts:
+          - type: audio
+            output_files:
+              - /path/to/podcast-quanzhan-ai-2026-04-12.mp3
+            status: completed    # pending | completed | failed
+        notebook_id: "notebook-uuid"
+```
+
+**Legacy format** (pre-migration; flat top-level keys) is transparently lifted by `load_state_file`
+into the `shows.<default_show_id>.*` shape. `write_state_file` always writes the new format.
 
 **Reading state:**
 ```bash
@@ -187,7 +233,42 @@ shutil.move(tmp, state_path)
 
 **Pruning:** On every write, remove `runs` entries older than `cleanup_days * 2` (default 14 days).
 
-**Concurrency:** Single-writer only. One MLL operation at a time. This is a known limitation.
+**Concurrency:** Single-writer only. One MLL operation at a time. This is enforced by `kb_mutation_lock`.
+
+## Mutation Lock
+
+All subcommands that write to `.notebooklm-state.yaml`, `episodes.yaml`, sidecar manifests, or `output/` files MUST acquire the KB-wide mutation lock before ANY write. Read-only subcommands (`status`, `list`) MUST NOT take the lock.
+
+**Lock usage pattern for mutating subcommands (podcast, quiz, digest, report, research-audio, cleanup):**
+
+```python
+import sys
+sys.path.insert(0, '<project_root>/plugins/kb/skills/kb-publish/scripts')
+from lock import kb_mutation_lock
+
+with kb_mutation_lock(project_root, command=f"kb-notebooklm {subcommand}"):
+    # ALL writes go here:
+    #   - .notebooklm-state.yaml updates (run records, watermark cursors, notebook entries)
+    #   - <output>/*.manifest.yaml writes (sidecar manifests)
+    #   - <output>/notebooklm/*.manifest.yaml writes
+    #   - Any other disk mutations
+    pass
+```
+
+**Read paths (status, list) do NOT take the lock.** They call `resolve_show_for_read` and only read state files.
+
+**Detached NotebookLM finalizer lock (CRITICAL):** The background agent spawned in step 6k (and equivalent steps in other async workflows) downloads the artifact and performs post-processing (assembly, transcription) without holding the lock — those steps are read-only or write to new files. However, when the background agent is ready to write its final results back to `.notebooklm-state.yaml` and to write the sidecar manifest, it MUST acquire the lock first:
+
+```python
+from lock import kb_mutation_lock
+
+with kb_mutation_lock(project_root, command=f"kb-notebooklm finalize:{run_id}"):
+    # Write .notebooklm-state.yaml (update artifact status, advance watermark, etc.)
+    # Write <output>/<stem>.mp3.manifest.yaml
+    pass
+```
+
+The `run_id` is the run record's timestamp (ISO 8601), used to make the lock command string unique and identifiable in lock file diagnostics. The background agent must import `lock.py` from `plugins/kb/skills/kb-publish/scripts/lock.py`.
 
 ## Deduplication
 
@@ -239,8 +320,10 @@ via the episode registry managed by kb-publish.
 
 ### Episode Registry
 
-**Location:** Read `integrations.xiaoyuzhou.episodes_registry` from `kb.yaml`. If the key
-is missing or the file doesn't exist, skip all continuity features (graceful degradation).
+**Location:** Use `show.episodes_registry` (resolved from the `Show` object in the Common
+Preamble). Falls back to `integrations.xiaoyuzhou.episodes_registry` from `kb.yaml` for
+legacy single-show configs. If missing or the file doesn't exist, skip all continuity
+features (graceful degradation).
 
 **Schema:** See kb-publish SKILL.md for the full schema. The fields relevant to
 kb-notebooklm are:
@@ -305,7 +388,7 @@ Before generating audio, compile a series bible from **published episodes only**
 **Series bible format:**
 
 ```
-SERIES CONTINUITY — "全栈AI" Podcast
+SERIES CONTINUITY — "{show.title}" Podcast
 
 The following PUBLISHED episodes have established knowledge with the audience.
 Build on prior content instead of repeating it.
@@ -352,7 +435,8 @@ responsibility (single-writer rule).
 **Sidecar schema:**
 
 ```yaml
-audio: podcast-attention-2026-04-20.mp3
+show: quanzhan-ai                 # show.id — REQUIRED in multi-show KBs
+audio: podcast-quanzhan-ai-attention-2026-04-20.mp3
 topic: "Flash Attention & KV Cache"
 notebook_id: "uuid"
 generated_date: 2026-04-20
@@ -538,7 +622,11 @@ Each workflow follows a common pattern: select source files from the KB, filter 
 
    **Backwards compat for pre-backfill episodes:**
 
-   Any published episode in `episodes.yaml` with `status: published` but no corresponding `wiki/episodes/ep-<N>-*.md` file surfaces a warning to the user: "EP<N> is published but not yet indexed. Run `/kb-publish backfill-index --episode <N>` to improve dedup accuracy." Proceed with whatever index data is available.
+   Any published episode in `episodes.yaml` (resolved via `show.episodes_registry`) with
+   `status: published` but no corresponding `wiki/<show.wiki_episodes_dir>/ep-<N>-*.md` file
+   surfaces a warning to the user: "EP<N> is published but not yet indexed. Run
+   `/kb-publish backfill-index --episode <N>` to improve dedup accuracy." Proceed with
+   whatever index data is available.
 
    **Error handling:**
    - If `wiki_dir` doesn't exist or has no `episodes/` subdir: log warning "no indexed episodes yet; proceeding as if novel", skip the judge call.
@@ -697,11 +785,13 @@ Each workflow follows a common pattern: select source files from the KB, filter 
 
 6k. **Spawn background agent (REVISED — assemble, then transcribe with actual offset):**
 
-    **Output filename stem:**
-    - Single episode: `podcast-YYYY-MM-DD`
-    - Grouped episodes: `podcast-<theme-slug>-YYYY-MM-DD`
-    - Topic-filtered: `podcast-<topic>-YYYY-MM-DD`
+    **Output filename stem (show-scoped — MANDATORY):**
+    - Single episode: `podcast-<show.id>-YYYY-MM-DD`
+    - Grouped episodes: `podcast-<show.id>-<theme-slug>-YYYY-MM-DD`
+    - Topic-filtered: `podcast-<show.id>-<topic>-YYYY-MM-DD`
     Let `<stem>` = the chosen filename stem; paths become `<output_path>/<stem>.raw.mp3`, `<output_path>/<stem>.mp3`, `<output_path>/<stem>.vtt`, `<output_path>/<stem>.transcript.md`.
+
+    **Rationale:** The `<show.id>` prefix ensures output files from different shows never collide even when they share the same date or theme.
 
     Use Agent tool with `run_in_background: true`:
     ```
@@ -746,7 +836,7 @@ Each workflow follows a common pattern: select source files from the KB, filter 
            --model <transcript.model> \
            --device <transcript.device> \
            --language <transcript.language> \
-           --title "全栈AI — <theme> (YYYY-MM-DD)" \
+           --title "{show.title} — <theme> (YYYY-MM-DD)" \
            --json
          Parse the JSON.
          If success: transcript_applied=true; speaker_count from the JSON.
