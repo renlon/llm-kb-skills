@@ -1689,9 +1689,9 @@ The subagent executing each task pulls the exact test code from the spec (§11 l
 ## Task 13: Migrator — detection tri-state
 
 - **Goal:** `migrate_multi_show.py:classify_kb_state(project_root) -> Literal["unmigrated", "partially_migrated", "fully_migrated"]`. Full-tree scan.
-- **Import hygiene:** `migrate_multi_show.py` imports shared helpers (`shows`, `state`, `lock`, `episode_wiki`) from the sibling kb-publish skill via a deterministic path-bump: `sys.path.insert(0, str(<repo>/plugins/kb/skills/kb-publish/scripts))`. Compute that path from `Path(__file__).resolve().parents[3] / "kb-publish" / "scripts"`. Test-side conftest already adds the local `kb/scripts` path; add a second insert for the kb-publish scripts dir.
+- **Import hygiene:** `migrate_multi_show.py` imports shared helpers (`shows`, `state`, `lock`, `episode_wiki`) from the sibling kb-publish skill via a deterministic path-bump: `sys.path.insert(0, str(<repo>/plugins/kb/skills/kb-publish/scripts))`. For `plugins/kb/skills/kb/scripts/migrate_multi_show.py`, `Path(__file__).resolve().parents` is `[scripts, kb, skills, kb (plugin root), plugins, ...]`, so the correct hop is `Path(__file__).resolve().parents[2] / "kb-publish" / "scripts"`. IMPORTANT: the module itself must perform this `sys.path` insert at import time (before the `import shows` / `import lock` / `import state` / `import episode_wiki` lines) — the test conftest's sibling-path insert is for test harness convenience only, not a substitute.
 - **Files:** create `plugins/kb/skills/kb/scripts/migrate_multi_show.py`; tests at `plugins/kb/skills/kb/scripts/tests/test_migrate_multi_show.py`.
-- **Tests:** `pre_migration_kb` fixture → `unmigrated`; partially-migrated fixture (kb.yaml has shows[] but flat episode files remain) → `partially_migrated`; a fully-migrated fixture → `fully_migrated`; import of shows/state/lock from migrate module works via the sibling-path bump.
+- **Tests:** `pre_migration_kb` fixture → `unmigrated`; partially-migrated fixture (kb.yaml has shows[] but flat episode files remain) → `partially_migrated`; a fully-migrated fixture → `fully_migrated`; **standalone-import test**: spawn a subprocess with a clean `sys.path` (PYTHONPATH unset, no conftest) that runs `python -c "import migrate_multi_show; migrate_multi_show.classify_kb_state(Path('...'))"` — validates the module's own `sys.path` insert is correct without the test conftest masking the bug.
 - **Commit:** `feat(kb): migrate — detection tri-state classifier`
 
 ## Task 14: Migrator — Phase A (plan + staging tree + snapshots)
@@ -1741,10 +1741,10 @@ The subagent executing each task pulls the exact test code from the spec (§11 l
 
 - **Goal:** per-entry copy-then-verify to live tree, sha256-fingerprint commit.log, resume after crash via log. kb.yaml committed last.
 - **Strict ordering invariant:** for each flat→nested episode file: (1) copy staged nested file to live `wiki/episodes/<show>/ep-N-<slug>.md`, (2) sha256-verify against staged, (3) append to commit.log, (4) ONLY THEN delete legacy flat `wiki/episodes/ep-N-<slug>.md`. Violating this ordering risks silent data loss.
-- **Resume live-drift guard:** for each entry not already in `commit.log`, consult `.kb-migration/before/manifest.yaml`:
-  - `existed_before=true`: live file at `relative_path` MUST match `sha256_before` (no user edits since Phase A). Drift → `LiveDriftError`.
-  - `existed_before=false`: destination path was expected to not exist. If it now exists and does NOT match `sha256_staged` (from an already-committed partial write), abort with `LiveDriftError` — some other process created a file at the destination.
-  - If the live file matches `sha256_staged`, treat it as already committed (idempotent advance).
+- **Resume live-drift guard:** for each entry not already in `commit.log`, consult `.kb-migration/before/manifest.yaml` and compute `sha256_live`:
+  - **First check (idempotent advance):** if `sha256_live == sha256_staged`, treat as already committed — skip. This applies regardless of `existed_before`, and covers the crash window "copy+verify succeeded, log append did not" for ALL entry types (episodes, stubs, state, kb.yaml, sidecars, other).
+  - **Otherwise, `existed_before=true`:** `sha256_live` MUST match `sha256_before`. Drift → `LiveDriftError`.
+  - **Otherwise, `existed_before=false`:** destination was expected to not exist. Any non-staged content there is drift → `LiveDriftError`.
   Already-committed entries listed in `commit.log` (matching the staging fingerprint) are skipped cleanly.
 - **Files:** modify `migrate_multi_show.py`; tests.
 - **Tests:**
@@ -1756,6 +1756,7 @@ The subagent executing each task pulls the exact test code from the spec (§11 l
   - **Resume live-drift test (existed_before=true):** after crash mid-Phase-C, user manually edits a not-yet-committed live file; `--resume` detects the drift vs `before/` snapshot and aborts with `LiveDriftError` — no overwrite happens.
   - **Resume live-drift test (existed_before=false):** after crash mid-Phase-C before a nested destination was written, another process creates a file at that destination with unexpected bytes; `--resume` aborts with `LiveDriftError` and leaves both the stray file and staging intact.
   - **Resume idempotency test (existed_before=false):** after crash mid-Phase-C AFTER a nested destination was written AND logged, `--resume` recognizes the live file's sha256 matches `sha256_staged` and skips the entry without re-writing.
+  - **Resume idempotency test (existed_before=true, copy-succeeded-log-missing):** a stub (or any existed_before=true entry) was copy+verified successfully but commit.log append did not happen before crash. Live bytes == `sha256_staged`. `--resume` MUST advance past this entry idempotently — no `LiveDriftError`. This covers the critical case that blocked round 3.
 - **Commit:** `feat(kb): migrate — Phase C (copy-then-verify commit with resume log)`
 
 ## Task 18: Migrator — CLI + lock + idle-check + dry-run
@@ -1771,18 +1772,20 @@ The subagent executing each task pulls the exact test code from the spec (§11 l
   - SIGINT during Phase C → lock released + partial commit.log + `.kb-migration/` intact for `--resume`.
 - **Commit:** `feat(kb): migrate — CLI with lock, idle-check, dry-run, resume`
 
-## Task 19: `kb-notebooklm/SKILL.md` — multi-show edits
+## Task 19: `kb-notebooklm/SKILL.md` — multi-show edits + lock wiring
 
-- **Goal:** step 1 preamble reads `show = resolve_show_for_mutation(shows, args.show)`; steps 4b, 5b, 6a', 6a'', 6i, 6k use `show.*` fields; branding touchpoints use `show.title`; cleanup/status use `resolve_show_for_read`; add `--show` flag everywhere.
+- **Goal:** step 1 preamble (a) reads `show = resolve_show_for_mutation(shows, args.show)` AND (b) acquires `kb_mutation_lock(project_root, command="kb-notebooklm <subcommand>")` around every section that writes to `.notebooklm-state.yaml`, episodes registry, sidecar manifests, or the output dir. Steps 4b, 5b, 6a', 6a'', 6i, 6k use `show.*` fields; branding touchpoints use `show.title`; cleanup/status use `resolve_show_for_read`; add `--show` flag everywhere.
+- **Critical — detached finalizer lock:** the NotebookLM wait-and-finalize step runs in a detached background process. That process MUST acquire `kb_mutation_lock` before its final writes (state update, sidecar rewrite, registry update). The SKILL.md finalizer command explicitly wraps the write section in `with kb_mutation_lock(project_root, command="kb-notebooklm finalize:<run-id>"):`. Per spec §6 and architecture statement at the top of this plan.
 - **Files:** modify `plugins/kb/skills/kb-notebooklm/SKILL.md`.
-- **Tests:** (SKILL.md isn't runnable; regression is via live test in task 24.) grep assertions: every hardcoded `全栈AI` is gone, every bare `ep-N` reference is gone.
-- **Commit:** `docs(kb-notebooklm): multi-show awareness in SKILL.md`
+- **Tests:** (SKILL.md isn't runnable; regression is via live test in task 24.) grep assertions: every hardcoded `全栈AI` is gone, every bare `ep-N` reference is gone, every write site (`.notebooklm-state.yaml`, `episodes.yaml`, sidecar manifest, finalizer section) is wrapped in `kb_mutation_lock`.
+- **Commit:** `docs(kb-notebooklm): multi-show awareness + mutation lock wiring in SKILL.md`
 
-## Task 20: `kb-publish/SKILL.md` — sequencing + --show + step 8c
+## Task 20: `kb-publish/SKILL.md` — sequencing + --show + step 8c + lock wiring
 
-- **Goal:** step 1 resolves effective show BEFORE reading episodes_registry; sidecar-vs-`--show` conflict raises `ShowMismatchError` (defined in `shows.py`); step 2b preserves show; step 8c passes show through.
+- **Goal:** step 1 resolves effective show BEFORE reading episodes_registry AND acquires `kb_mutation_lock(project_root, command="kb-publish <subcommand>")` around every write section (episodes.yaml updates, wiki/episodes/<show>/ writes, sidecar manifests); sidecar-vs-`--show` conflict raises `ShowMismatchError` (defined in `shows.py`); step 2b preserves show; step 8c passes show through.
 - **Files:** modify `plugins/kb/skills/kb-publish/SKILL.md`; ensure `shows.py` defines and exports `ShowMismatchError` (add a tiny prereq edit to Task 2 if absent).
-- **Commit:** `docs(kb-publish): multi-show sequencing in SKILL.md`
+- **Tests:** grep assertions in SKILL.md: every write section (episodes.yaml mutation, wiki episode write, sidecar manifest write) is wrapped in `kb_mutation_lock`.
+- **Commit:** `docs(kb-publish): multi-show sequencing + mutation lock wiring in SKILL.md`
 
 ## Task 21: `kb-init/SKILL.md` — seed shows[0]
 
@@ -1807,7 +1810,11 @@ The subagent executing each task pulls the exact test code from the spec (§11 l
 
 - **Goal:** run `/kb migrate --dry-run` on `~/Documents/MLL/`, review plan, then run for real. Verify wiki/episodes/quanzhan-ai/*.md and episodes.yaml still work. No pending jobs allowed — ensures idle check passes.
 - **Files:** none (live run).
-- **Verification:** after migration, run `/kb-notebooklm status` and confirm it reads the new show-scoped state. Run a dry `backfill-index --show quanzhan-ai --episode 1` (no regeneration needed) and confirm it parses the migrated wiki/episodes/quanzhan-ai/ep-1-*.md.
+- **Verification:**
+  - After migration, run `/kb-notebooklm status` and confirm it reads the new show-scoped state.
+  - Run a dry `backfill-index --show quanzhan-ai --episode 1` (no regeneration needed) and confirm it parses the migrated wiki/episodes/quanzhan-ai/ep-1-*.md.
+  - **Lock-coverage audit:** before running a real podcast workflow, `grep -n "kb_mutation_lock\|episodes.yaml\|\.notebooklm-state" plugins/kb/skills/kb-notebooklm/SKILL.md plugins/kb/skills/kb-publish/SKILL.md` and manually verify every write site is inside a `with kb_mutation_lock(...):` block. If any write is missed, block the rollout and file a task.
+  - Kick off a real podcast run, then in another shell try `/kb-notebooklm status` while the first is writing — confirm the second blocks on the lock (or times out with `LockBusyError`), proving the lock is live.
 - **No commit** — changes live in the user's KB, not this repo.
 
 ## Task 25: Verify EP3 v2 re-generate post-migration
