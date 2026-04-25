@@ -308,6 +308,60 @@ integrations:
 
 **E. Note on model caching:** `faster-whisper` uses the standard HuggingFace cache at `~/.cache/huggingface/hub/`. If the user has VoxToriApp installed on the same machine, the `large-v3` model is likely already cached at `~/.cache/huggingface/hub/models--Systran--faster-whisper-large-v3` and will be reused automatically. Do NOT override `HF_HOME` in this skill.
 
+#### 5f. Seed `shows[0]` (MANDATORY — always runs when NotebookLM is enabled)
+
+Fresh installs MUST create a single `shows[0]` entry with `default: true`. **Never write the
+legacy flat single-show podcast config for new installs** — the `integrations.shows[0]` format
+is the only supported shape going forward.
+
+**Prompt the user for show identity (use defaults if they press Enter/skip):**
+
+```
+Show ID (lowercase, hyphens only, e.g. "quanzhan-ai") [quanzhan-ai]: <input>
+Show title (e.g. "全栈AI") [全栈AI]: <input>
+Host 1 name [瓜瓜龙]: <input>
+Host 2 name [海发菜]: <input>
+```
+
+Validate the show id: must match `^[a-z][a-z0-9\-]{0,31}$`. If invalid, re-prompt.
+
+**Write to `kb.yaml` under `integrations.shows` (non-destructive merge — append after notebooklm/xiaoyuzhou):**
+
+```yaml
+integrations:
+  shows:
+    - id: <prompted-id>             # e.g. quanzhan-ai
+      title: '<prompted-title>'     # e.g. 全栈AI
+      default: true
+      language: zh_Hans
+      hosts: [<host-1>, <host-2>]
+      episodes_registry: episodes.yaml
+      wiki_episodes_dir: episodes/<prompted-id>
+      podcast_format: deep-dive
+      podcast_length: long
+      intro_music: null             # user can set path later; null = no intro music
+      intro_music_length_seconds: 12
+      intro_crossfade_seconds: 3
+      transcript:
+        enabled: <transcript_enabled>
+        model: large-v3
+        device: auto
+        language: zh
+      xiaoyuzhou:
+        podcast_id: null            # filled when first episode is published
+```
+
+**`episodes_registry` and `wiki_episodes_dir`** are always relative (resolved against project
+root at runtime). Do NOT write absolute paths here.
+
+**Create the wiki episodes subdirectory immediately:**
+
+```bash
+mkdir -p "<wiki_path>/episodes/<prompted-id>"
+```
+
+This ensures the directory exists before the first compile or backfill-index run.
+
 ### 6. Maintenance Cadence
 
 Inform about options:
@@ -323,13 +377,23 @@ Write `kb.yaml` at project root with paths, `output_formats`, obsidian config, a
 integrations:
   smaug:
     path: null  # set automatically when Smaug is installed
+  # shows: section is written by step 5f when NotebookLM is enabled.
+  # It MUST be present and MUST contain at least one show with default: true
+  # for kb-notebooklm and kb-publish to function. See step 5f for schema.
 ```
 
 When the user sets up Smaug (during init or later), save the install path here. The kb skill reads this to find Smaug without searching every time.
 
+**IMPORTANT:** Do NOT write a flat/legacy single-show podcast config (e.g., top-level
+`integrations.notebooklm.podcast.hosts`, `integrations.xiaoyuzhou.episodes_registry` as the
+sole registry pointer). New installs always use `integrations.shows[0]`. The `shows[0]` entry
+is the single source of truth for show identity, hosts, registry path, and wiki directory.
+
 ### 8. Scaffold Directories
 
 Create: `raw/articles/`, `raw/papers/`, `raw/repos/`, `raw/notes/`, `raw/images/`, `raw/transcripts/`, `raw/datasets/`, `wiki/`, `output/`. Plus `.obsidian/` if new vault.
+
+If a show was configured in step 5f, also create `wiki/episodes/<show-id>/` at this point (or confirm it was already created in step 5f — both paths are idempotent).
 
 ### 9. Write Project Files
 
@@ -346,3 +410,5 @@ Tell user what to do next: add sources, compile, and list available workflows (`
 - Do not skip the source-gathering strategy question -- it determines the entire workflow.
 - Do not create `.obsidian/` inside a directory that is already an Obsidian vault.
 - Do not assume output formats -- always ask the user.
+- Do not write the legacy flat single-show config (top-level `integrations.notebooklm.podcast.*`) as the sole podcast identity for new installs. Always seed `integrations.shows[0]` with `default: true` via step 5f.
+- Do not skip creating `wiki/episodes/<show-id>/` -- kb-publish and backfill-index expect the directory to exist.
