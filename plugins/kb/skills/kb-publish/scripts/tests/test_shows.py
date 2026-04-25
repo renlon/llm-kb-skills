@@ -137,3 +137,145 @@ def test_load_shows_raises_when_missing(tmp_path: Path):
     kb = {"integrations": {"notebooklm": {"wiki_path": str(tmp_path / "wiki")}}}
     with pytest.raises(S.ShowConfigError):
         S.load_shows(kb, project_root=tmp_path)
+
+
+# ------------------------------
+# EpRef
+# ------------------------------
+
+def test_epref_from_dict_valid():
+    r = S.EpRef.from_dict({"show": "quanzhan-ai", "ep": 3})
+    assert r.show == "quanzhan-ai"
+    assert r.ep == 3
+
+
+def test_epref_from_dict_raises_on_missing_fields():
+    with pytest.raises(ValueError):
+        S.EpRef.from_dict({"show": "a"})
+    with pytest.raises(ValueError):
+        S.EpRef.from_dict({"ep": 1})
+    with pytest.raises(ValueError):
+        S.EpRef.from_dict({})
+
+
+def test_epref_from_dict_raises_on_wrong_types():
+    with pytest.raises(ValueError):
+        S.EpRef.from_dict({"show": 123, "ep": 1})
+    with pytest.raises(ValueError):
+        S.EpRef.from_dict({"show": "a", "ep": "not-a-number"})
+    with pytest.raises(ValueError):
+        S.EpRef.from_dict({"show": "a", "ep": 0})  # ep must be >= 1
+
+
+def test_epref_from_legacy_str():
+    r = S.EpRef.from_legacy("ep-3", default_show="quanzhan-ai")
+    assert r.show == "quanzhan-ai" and r.ep == 3
+
+
+def test_epref_from_legacy_bare_int():
+    r = S.EpRef.from_legacy(5, default_show="my-show")
+    assert r.show == "my-show" and r.ep == 5
+
+
+def test_epref_from_legacy_rejects_bad_str():
+    with pytest.raises(ValueError):
+        S.EpRef.from_legacy("episode-3", default_show="x")
+    with pytest.raises(ValueError):
+        S.EpRef.from_legacy("ep-notanum", default_show="x")
+
+
+def test_epref_to_dict_roundtrip():
+    r = S.EpRef(show="a", ep=2)
+    assert r.to_dict() == {"show": "a", "ep": 2}
+    r2 = S.EpRef.from_dict(r.to_dict())
+    assert r == r2
+
+
+def test_epref_wikilink_stem():
+    r = S.EpRef(show="quanzhan-ai", ep=3)
+    assert r.wikilink_stem("kv-cache") == "wiki/episodes/quanzhan-ai/ep-3-kv-cache"
+
+
+def test_parse_ep_ref_field_valid():
+    r = S.parse_ep_ref_field({"show": "quanzhan-ai", "ep": 1}, known_shows={"quanzhan-ai"})
+    assert r.show == "quanzhan-ai" and r.ep == 1
+
+
+def test_parse_ep_ref_field_rejects_legacy_str():
+    with pytest.raises(S.MigrationRequiredError):
+        S.parse_ep_ref_field("ep-1", known_shows={"quanzhan-ai"})
+
+
+def test_parse_ep_ref_field_rejects_legacy_int():
+    with pytest.raises(S.MigrationRequiredError):
+        S.parse_ep_ref_field(1, known_shows={"quanzhan-ai"})
+
+
+def test_parse_ep_ref_field_raises_on_unknown_show():
+    with pytest.raises(S.UnknownShowError):
+        S.parse_ep_ref_field({"show": "other", "ep": 1}, known_shows={"quanzhan-ai"})
+
+
+# ------------------------------
+# Resolvers
+# ------------------------------
+
+def _make_shows(ids: list[str]) -> list[S.Show]:
+    """Helper to build real Show objects for resolver tests."""
+    shows = []
+    for i, sid in enumerate(ids):
+        shows.append(S.Show(
+            id=sid, title=sid.title(), description="",
+            default=False, language="zh_Hans",
+            hosts=["A", "B"], extra_host_names=[],
+            intro_music=None,
+            intro_music_length_seconds=12, intro_crossfade_seconds=3,
+            podcast_format="deep-dive", podcast_length="long",
+            transcript={"enabled": False, "model": "", "device": "auto", "language": "zh"},
+            episodes_registry=f"episodes-{sid}.yaml" if i > 0 else "episodes.yaml",
+            wiki_episodes_dir=f"episodes/{sid}",
+            xiaoyuzhou={},
+        ))
+    return shows
+
+
+def test_resolve_mutation_single_show_implicit():
+    shows = _make_shows(["a"])
+    assert S.resolve_show_for_mutation(shows, None).id == "a"
+
+
+def test_resolve_mutation_single_show_explicit():
+    shows = _make_shows(["a"])
+    assert S.resolve_show_for_mutation(shows, "a").id == "a"
+
+
+def test_resolve_mutation_single_show_unknown_id():
+    shows = _make_shows(["a"])
+    with pytest.raises(S.ShowNotFoundError):
+        S.resolve_show_for_mutation(shows, "other")
+
+
+def test_resolve_mutation_multi_show_no_flag_is_error():
+    shows = _make_shows(["a", "b"])
+    with pytest.raises(S.AmbiguousShowError):
+        S.resolve_show_for_mutation(shows, None)
+
+
+def test_resolve_mutation_multi_show_explicit_selects():
+    shows = _make_shows(["a", "b"])
+    assert S.resolve_show_for_mutation(shows, "b").id == "b"
+
+
+def test_resolve_read_single_show_implicit():
+    shows = _make_shows(["a"])
+    assert S.resolve_show_for_read(shows, None).id == "a"
+
+
+def test_resolve_read_multi_show_no_flag_returns_none():
+    shows = _make_shows(["a", "b"])
+    assert S.resolve_show_for_read(shows, None) is None
+
+
+def test_resolve_read_multi_show_explicit_selects():
+    shows = _make_shows(["a", "b"])
+    assert S.resolve_show_for_read(shows, "a").id == "a"

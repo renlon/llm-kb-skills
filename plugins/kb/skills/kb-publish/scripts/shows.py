@@ -196,3 +196,126 @@ def load_shows(kb_yaml: dict, project_root: Path) -> list[Show]:
             "integrations.shows is missing — run `/kb migrate` to convert a single-show KB"
         )
     return validate_shows(shows_raw, project_root=project_root, wiki_path=wiki_path)
+
+
+@dataclass(frozen=True)
+class EpRef:
+    """Reference to a specific episode of a specific show."""
+    show: str
+    ep: int
+
+    def __post_init__(self):
+        if not isinstance(self.show, str) or not self.show:
+            raise ValueError(f"EpRef.show must be a non-empty string: {self.show!r}")
+        if not isinstance(self.ep, int) or self.ep < 1:
+            raise ValueError(f"EpRef.ep must be a positive int: {self.ep!r}")
+
+    def to_dict(self) -> dict:
+        return {"show": self.show, "ep": self.ep}
+
+    def wikilink_stem(self, slug: str) -> str:
+        """Return the path-without-.md used inside [[ ]] wikilinks.
+
+        The Obsidian wikilink stem is conventional: wiki/episodes/<show>/ep-<N>-<slug>,
+        matching the default wiki_episodes_dir layout.
+        """
+        return f"wiki/episodes/{self.show}/ep-{self.ep}-{slug}"
+
+    @classmethod
+    def from_dict(cls, d: Any) -> "EpRef":
+        """Strict parse of a dict-form EpRef. Raises on missing/bad fields."""
+        if not isinstance(d, dict):
+            raise ValueError(f"EpRef expects a dict, got {type(d).__name__}")
+        show = d.get("show")
+        ep = d.get("ep")
+        if not isinstance(show, str) or not show:
+            raise ValueError(f"EpRef.show must be a non-empty string: {d}")
+        if not isinstance(ep, int) or ep < 1:
+            raise ValueError(f"EpRef.ep must be a positive int: {d}")
+        return cls(show=show, ep=ep)
+
+    @classmethod
+    def from_legacy(cls, value: Any, *, default_show: str) -> "EpRef":
+        """Parse a legacy str 'ep-N' or bare int N as default_show's ref.
+        ONLY used by the migrator."""
+        if isinstance(value, int):
+            if value < 1:
+                raise ValueError(f"legacy int ref must be >= 1: {value}")
+            return cls(show=default_show, ep=value)
+        if isinstance(value, str):
+            m = re.match(r"^ep-(\d+)$", value)
+            if not m:
+                raise ValueError(f"legacy ref must match 'ep-N': {value!r}")
+            return cls(show=default_show, ep=int(m.group(1)))
+        raise ValueError(f"legacy ref must be str or int: {value!r}")
+
+
+def parse_ep_ref_field(value: Any, *, known_shows: set[str]) -> EpRef:
+    """Strict parse of a dict-form EpRef with REFERENTIAL validation.
+
+    Raises:
+      - MigrationRequiredError on legacy str / int
+      - ValueError on missing/wrong-typed fields
+      - UnknownShowError on ref.show not in known_shows
+    """
+    if isinstance(value, (str, int)):
+        raise MigrationRequiredError(
+            f"legacy episode ref {value!r} — run `/kb migrate` to convert"
+        )
+    ref = EpRef.from_dict(value)
+    if ref.show not in known_shows:
+        raise UnknownShowError(
+            f"EpRef.show={ref.show!r} not in configured shows {sorted(known_shows)}"
+        )
+    return ref
+
+
+def resolve_show_for_mutation(
+    shows: list[Show],
+    show_id: str | None,
+) -> Show:
+    """Resolver for mutating commands.
+
+    - single-show + None → shows[0]
+    - single-show + explicit → matched (or ShowNotFoundError)
+    - multi-show + None → AmbiguousShowError
+    - multi-show + explicit → matched (or ShowNotFoundError)
+    """
+    if show_id is not None:
+        for show in shows:
+            if show.id == show_id:
+                return show
+        available = ", ".join(sorted(s.id for s in shows))
+        raise ShowNotFoundError(
+            f"show {show_id!r} not configured. Available: {available}"
+        )
+    if len(shows) == 1:
+        return shows[0]
+    ids = ", ".join(sorted(s.id for s in shows))
+    raise AmbiguousShowError(
+        f"multiple shows configured ({ids}); --show is required"
+    )
+
+
+def resolve_show_for_read(
+    shows: list[Show],
+    show_id: str | None,
+) -> Show | None:
+    """Resolver for read-all commands.
+
+    - single-show + None → shows[0]
+    - single-show + explicit → matched (or ShowNotFoundError)
+    - multi-show + None → None (signal: iterate all shows)
+    - multi-show + explicit → matched (or ShowNotFoundError)
+    """
+    if show_id is not None:
+        for show in shows:
+            if show.id == show_id:
+                return show
+        available = ", ".join(sorted(s.id for s in shows))
+        raise ShowNotFoundError(
+            f"show {show_id!r} not configured. Available: {available}"
+        )
+    if len(shows) == 1:
+        return shows[0]
+    return None
