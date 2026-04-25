@@ -1644,10 +1644,11 @@ The subagent executing each task pulls the exact test code from the spec (§11 l
 
 ## Task 7: `episode_wiki.py` — `compute_depth_deltas` emits `{show, ep}`, raises `MixedShowCoverageError`
 
-- **Goal:** output `prior_episode_ref` as `{show, ep}` dict (not int); raise `MixedShowCoverageError` on mixed-show coverage_map. `MixedShowCoverageError` is defined in `episode_wiki.py` (subclassing `shows.ShowConfigError`) and exported.
-- **Coverage-map data shape (extended):** `IndexedEpisode` gains a `show_id: str` field populated by `scan_episode_wiki` (from the passed `Show.id`). `compute_depth_deltas` builds its internal `coverage_map: dict[str, list[IndexedEpisode]]` from concepts across already-indexed episodes, so every entry carries `show_id`. The signature becomes `compute_depth_deltas(current_episode_show_id: str, current_concepts: list[dict], indexed: list[IndexedEpisode]) -> list[dict]`. The function filters `indexed` to entries with `show_id == current_episode_show_id` before reasoning; if any surviving entry ever disagrees with `current_episode_show_id` in downstream helpers, raise `MixedShowCoverageError`.
+- **Goal:** output `prior_episode_ref` as `{show, ep}` dict (not int); raise `MixedShowCoverageError` when the caller passes an `indexed` list containing any entry whose `show_id != current_episode_show_id`. `MixedShowCoverageError` is defined in `episode_wiki.py` (subclassing `shows.ShowConfigError`) and exported.
+- **Coverage-map data shape (extended):** `IndexedEpisode` gains a `show_id: str` field populated by `scan_episode_wiki` (from the passed `Show.id`). `compute_depth_deltas` takes `(current_episode_show_id: str, current_concepts: list[dict], indexed: list[IndexedEpisode]) -> list[dict]`.
+- **Semantics — hard fail on mixed-show input:** the function does NOT silently filter. At entry, it validates that every `indexed[i].show_id == current_episode_show_id`; if any entry disagrees, raise `MixedShowCoverageError(f"coverage_map contains show {other!r}, expected {current_episode_show_id!r}")`. Callers (SKILL.md step 5b and similar) are responsible for scoping `indexed` to the current show via `scan_episode_wiki(show=current_show)` before calling — this surfaces caller bugs loudly instead of masking them.
 - **Files:** modify `episode_wiki.py`; update tests.
-- **Tests:** new-path emits dict with `{show: current_episode_show_id, ep: <N>}`; mixed-show coverage_map raises `MixedShowCoverageError`; tie-break is lowest-ep-id within-show; `prior_episode_ref` is `None` when no prior coverage; single-show coverage_map produces correct EpRef dict; `IndexedEpisode.show_id` is populated from the Show passed to `scan_episode_wiki`.
+- **Tests:** new-path emits dict with `{show: current_episode_show_id, ep: <N>}`; a single foreign `indexed` entry raises `MixedShowCoverageError`; tie-break is lowest-ep-id within-show; `prior_episode_ref` is `None` when no prior coverage; `IndexedEpisode.show_id` is populated from the Show passed to `scan_episode_wiki`.
 - **Commit:** `feat(kb-publish): compute_depth_deltas emits EpRef dict, rejects mixed-show`
 
 ## Task 8: `episode_wiki.py` — stub + episode article YAML writes use new dict form
@@ -1703,7 +1704,7 @@ The subagent executing each task pulls the exact test code from the spec (§11 l
   - `staging/wiki/**/<stub>.md` — every stub with dict-form `created_by/last_seen_by/best_depth_episode/referenced_by` AND body wikilinks rewritten.
   - `staging/.notebooklm-state.yaml` — new-format state file (dual-format loader handles legacy→new; writer re-serializes).
   - `before/` — snapshots of every live file about to change (episode articles, stubs, kb.yaml, `.notebooklm-state.yaml`, sidecars). Used by Phase A-bis restore and Phase C resume validation.
-- **Body wikilink rewrite (new):** every `[[wiki/episodes/ep-N-<slug>]]` (or `[[wiki/episodes/ep-N-<slug>|display]]`) inside ANY staged file body (episode articles, stubs, AND any other wiki file that contained such a link) must be rewritten to `[[wiki/episodes/<default-show-id>/ep-N-<slug>]]` (display text preserved). Use a scan-and-rewrite pass over `wiki/**/*.md` that invokes `resolve_episode_wikilink`-style lookup (the staged show is known; the ep-N slug is on disk). Any wikilink whose `ep-N-<slug>` can't be resolved to a file on disk is a planning error and fails Phase A.
+- **Body wikilink rewrite (new):** every `[[wiki/episodes/ep-N-<slug>]]` (or `[[wiki/episodes/ep-N-<slug>|display]]`) inside any `wiki/**/*.md` must be rewritten to `[[wiki/episodes/<default-show-id>/ep-N-<slug>]]` (display text preserved). Phase A scans `wiki/**/*.md` once; every file that matches at least one legacy pattern is treated as a migration target — it gets snapshotted to `before/`, staged to `staging/`, and added to `commit_order`. Files not in the episode/stub categories use the filename `staging/wiki/<relative-path>` and are committed via the same per-entry copy-then-verify-then-log-then-delete flow Phase C uses for episode articles (with no flat-vs-nested rename; destination path equals source path). Any wikilink whose `ep-N-<slug>` can't be resolved to a file on disk is a planning error and fails Phase A (staging cleaned up).
 - **Files:** modify `migrate_multi_show.py`; tests.
 - **Tests:**
   - fixture KB → `.kb-migration/staging/kb.yaml` has `shows[0].id == default_show_id`.
@@ -1712,7 +1713,9 @@ The subagent executing each task pulls the exact test code from the spec (§11 l
   - `.kb-migration/staging/.notebooklm-state.yaml` has `shows: { <show-id>: {...} }` top-level.
   - `.kb-migration/plan.yaml` exists with non-empty `commit_order`, matching the staged tree.
   - `.kb-migration/before/` contains byte-exact copies of every live file that will be rewritten (snapshot restore test).
+  - `.kb-migration/before/manifest.yaml` records for each commit_order entry: `relative_path`, `existed_before: bool`, `sha256_before: str | null`, `sha256_staged: str`, `category: "episode"|"stub"|"state"|"kb"|"sidecar"|"other"`. Phase C uses this for the live-drift guard and to handle the "destination path was new" case explicitly.
   - Fixture with a flat body wikilink `[[wiki/episodes/ep-1-test]]` inside an episode article and inside a stub → both rewritten to `[[wiki/episodes/<show-id>/ep-1-test]]` in staging; display-text form `[[wiki/episodes/ep-1-test|nice name]]` → `[[wiki/episodes/<show-id>/ep-1-test|nice name]]`.
+  - Fixture with a legacy wikilink inside a non-episode, non-stub wiki file (e.g. `wiki/notes/reading-list.md`) → rewritten in staging, added to `commit_order` + snapshotted to `before/` + recorded in manifest with `category: other`.
   - Fixture with a body wikilink to a non-existent `ep-99-<slug>` → Phase A raises with a clear error (unresolvable); staging is cleaned up so `.kb-migration/` is not left half-written.
 - **Commit:** `feat(kb): migrate — Phase A (plan.yaml + staging + before/ snapshots)`
 
@@ -1738,7 +1741,11 @@ The subagent executing each task pulls the exact test code from the spec (§11 l
 
 - **Goal:** per-entry copy-then-verify to live tree, sha256-fingerprint commit.log, resume after crash via log. kb.yaml committed last.
 - **Strict ordering invariant:** for each flat→nested episode file: (1) copy staged nested file to live `wiki/episodes/<show>/ep-N-<slug>.md`, (2) sha256-verify against staged, (3) append to commit.log, (4) ONLY THEN delete legacy flat `wiki/episodes/ep-N-<slug>.md`. Violating this ordering risks silent data loss.
-- **Resume live-drift guard:** before acting on any entry not already logged as committed, sha256-compare the live file against `.kb-migration/before/<relative-path>`. If they differ (user edited the file between crash and resume), abort with `LiveDriftError` — do not overwrite manual edits. Already-committed entries (matching the staging fingerprint) are skipped cleanly.
+- **Resume live-drift guard:** for each entry not already in `commit.log`, consult `.kb-migration/before/manifest.yaml`:
+  - `existed_before=true`: live file at `relative_path` MUST match `sha256_before` (no user edits since Phase A). Drift → `LiveDriftError`.
+  - `existed_before=false`: destination path was expected to not exist. If it now exists and does NOT match `sha256_staged` (from an already-committed partial write), abort with `LiveDriftError` — some other process created a file at the destination.
+  - If the live file matches `sha256_staged`, treat it as already committed (idempotent advance).
+  Already-committed entries listed in `commit.log` (matching the staging fingerprint) are skipped cleanly.
 - **Files:** modify `migrate_multi_show.py`; tests.
 - **Tests:**
   - happy-path commit (all entries in commit.log, legacy flat files removed, kb.yaml swapped).
@@ -1746,7 +1753,9 @@ The subagent executing each task pulls the exact test code from the spec (§11 l
   - crash BETWEEN nested-copy+log-append AND legacy-delete → resume completes the delete (flat file still present but commit.log shows entry committed).
   - crash before kb.yaml swap → resume completes it.
   - **Delete-ordering safety test:** simulate crash INSIDE the nested-copy (file written but verify fails) → legacy flat file must still exist; resume re-copies from staging and never deletes the flat file until the nested copy's sha256 matches.
-  - **Resume live-drift test:** after crash mid-Phase-C, user manually edits a not-yet-committed live file; `--resume` detects the drift vs `before/` snapshot and aborts with `LiveDriftError` — no overwrite happens.
+  - **Resume live-drift test (existed_before=true):** after crash mid-Phase-C, user manually edits a not-yet-committed live file; `--resume` detects the drift vs `before/` snapshot and aborts with `LiveDriftError` — no overwrite happens.
+  - **Resume live-drift test (existed_before=false):** after crash mid-Phase-C before a nested destination was written, another process creates a file at that destination with unexpected bytes; `--resume` aborts with `LiveDriftError` and leaves both the stray file and staging intact.
+  - **Resume idempotency test (existed_before=false):** after crash mid-Phase-C AFTER a nested destination was written AND logged, `--resume` recognizes the live file's sha256 matches `sha256_staged` and skips the entry without re-writing.
 - **Commit:** `feat(kb): migrate — Phase C (copy-then-verify commit with resume log)`
 
 ## Task 18: Migrator — CLI + lock + idle-check + dry-run
