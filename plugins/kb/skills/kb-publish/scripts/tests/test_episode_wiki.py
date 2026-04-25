@@ -93,90 +93,138 @@ def test_slug_to_wiki_relative_path_does_not_double_nest():
 # compute_depth_deltas
 # ---------------------------------------------------------------------------
 
+def _make_indexed_episode(ep_id: int, show_id: str, slug: str, depth: str) -> E.IndexedEpisode:
+    """Helper to create a minimal IndexedEpisode for coverage tests."""
+    return E.IndexedEpisode(
+        episode_id=ep_id,
+        title=f"EP{ep_id}",
+        date="2026-01-01",
+        depth="deep-dive",
+        audio_file="a.mp3",
+        transcript_file=None,
+        concepts=[E.IndexedConcept(
+            slug=slug,
+            depth_this_episode=depth,
+            depth_delta_vs_past="new",
+            prior_episode_ref=None,
+            what="",
+            why_it_matters="",
+            key_points=[],
+            covered_at_sec=None,
+        )],
+        open_threads=[],
+        series_builds_on=[],
+        series_followup_candidates=[],
+        show_id=show_id,
+    )
+
+
 def test_depth_delta_new_when_no_priors():
     concepts = [{"slug": "wiki/foo/bar", "depth_this_episode": "explained"}]
-    result = compute_depth_deltas(concepts, {})
+    result = compute_depth_deltas("my-show", concepts, [])
     assert result[0]["depth_delta_vs_past"] == "new"
     assert result[0]["prior_episode_ref"] is None
 
 
 def test_depth_delta_deeper_when_new_exceeds_best():
-    coverage = {"wiki/foo/bar": [{"ep_id": 1, "depth": "mentioned", "key_points": [], "date": "2026-01-01"}]}
+    indexed = [_make_indexed_episode(1, "my-show", "wiki/foo/bar", "mentioned")]
     concepts = [{"slug": "wiki/foo/bar", "depth_this_episode": "deep-dive"}]
-    result = compute_depth_deltas(concepts, coverage)
+    result = compute_depth_deltas("my-show", concepts, indexed)
     assert result[0]["depth_delta_vs_past"] == "deeper"
-    assert result[0]["prior_episode_ref"] == 1
+    assert result[0]["prior_episode_ref"] == {"show": "my-show", "ep": 1}
 
 
 def test_depth_delta_same_when_match():
-    coverage = {"wiki/foo/bar": [{"ep_id": 2, "depth": "explained", "key_points": [], "date": "2026-01-01"}]}
+    indexed = [_make_indexed_episode(2, "my-show", "wiki/foo/bar", "explained")]
     concepts = [{"slug": "wiki/foo/bar", "depth_this_episode": "explained"}]
-    result = compute_depth_deltas(concepts, coverage)
+    result = compute_depth_deltas("my-show", concepts, indexed)
     assert result[0]["depth_delta_vs_past"] == "same"
-    assert result[0]["prior_episode_ref"] == 2
+    assert result[0]["prior_episode_ref"] == {"show": "my-show", "ep": 2}
 
 
 def test_depth_delta_lighter_when_below():
-    coverage = {"wiki/foo/bar": [{"ep_id": 3, "depth": "deep-dive", "key_points": [], "date": "2026-01-01"}]}
+    indexed = [_make_indexed_episode(3, "my-show", "wiki/foo/bar", "deep-dive")]
     concepts = [{"slug": "wiki/foo/bar", "depth_this_episode": "mentioned"}]
-    result = compute_depth_deltas(concepts, coverage)
+    result = compute_depth_deltas("my-show", concepts, indexed)
     assert result[0]["depth_delta_vs_past"] == "lighter"
-    assert result[0]["prior_episode_ref"] == 3
+    assert result[0]["prior_episode_ref"] == {"show": "my-show", "ep": 3}
 
 
 def test_depth_delta_tie_breaks_by_lowest_ep_id():
     # Two prior episodes both covered at "explained" depth — tie-break by lowest ep_id
-    coverage = {
-        "wiki/foo/bar": [
-            {"ep_id": 5, "depth": "explained", "key_points": [], "date": "2026-03-01"},
-            {"ep_id": 2, "depth": "explained", "key_points": [], "date": "2026-01-01"},
-        ]
-    }
+    indexed = [
+        _make_indexed_episode(5, "my-show", "wiki/foo/bar", "explained"),
+        _make_indexed_episode(2, "my-show", "wiki/foo/bar", "explained"),
+    ]
     concepts = [{"slug": "wiki/foo/bar", "depth_this_episode": "explained"}]
-    result = compute_depth_deltas(concepts, coverage)
+    result = compute_depth_deltas("my-show", concepts, indexed)
     assert result[0]["depth_delta_vs_past"] == "same"
     # Lowest ep_id wins tie-break
-    assert result[0]["prior_episode_ref"] == 2
+    assert result[0]["prior_episode_ref"] == {"show": "my-show", "ep": 2}
+
+
+def test_compute_depth_deltas_emits_dict_ref():
+    """Task 7: prior_episode_ref must be emitted as {show, ep} dict."""
+    indexed = [_make_indexed_episode(4, "quanzhan-ai", "wiki/ml/attention", "mentioned")]
+    concepts = [{"slug": "wiki/ml/attention", "depth_this_episode": "explained"}]
+    result = compute_depth_deltas("quanzhan-ai", concepts, indexed)
+    ref = result[0]["prior_episode_ref"]
+    assert isinstance(ref, dict)
+    assert ref["show"] == "quanzhan-ai"
+    assert ref["ep"] == 4
+
+
+def test_compute_depth_deltas_raises_on_mixed_show():
+    """Task 7: foreign show_id in indexed list must raise MixedShowCoverageError."""
+    from episode_wiki import MixedShowCoverageError
+    indexed = [
+        _make_indexed_episode(1, "show-a", "wiki/foo/bar", "mentioned"),
+        _make_indexed_episode(2, "show-b", "wiki/foo/bar", "explained"),  # foreign show
+    ]
+    concepts = [{"slug": "wiki/foo/bar", "depth_this_episode": "explained"}]
+    with pytest.raises(MixedShowCoverageError, match="show-b"):
+        compute_depth_deltas("show-a", concepts, indexed)
 
 
 # ---------------------------------------------------------------------------
 # compute_stub_update
 # ---------------------------------------------------------------------------
 
+# New dict-form frontmatter (post-migration)
 _BASE_STUB_FM = {
     "title": "K Quants",
     "tags": ["stub", "quantization"],
     "status": "stub",
-    "created_by": "ep-1",
-    "last_seen_by": "ep-1",
-    "best_depth_episode": "ep-1",
+    "created_by": {"show": "my-show", "ep": 1},
+    "last_seen_by": {"show": "my-show", "ep": 1},
+    "best_depth_episode": {"show": "my-show", "ep": 1},
     "best_depth": "mentioned",
-    "referenced_by": ["ep-1"],
+    "referenced_by": [{"show": "my-show", "ep": 1}],
     "created": "2026-01-01",
 }
 
 
 def test_stub_update_always_updates_last_seen_by():
     concept = {"depth_this_episode": "mentioned"}
-    result = compute_stub_update(dict(_BASE_STUB_FM), concept, episode_id=2)
+    result = compute_stub_update(dict(_BASE_STUB_FM), concept, episode_id=2, show_id="my-show")
     assert result is not None
-    assert result["last_seen_by"] == "ep-2"
+    assert result["last_seen_by"] == {"show": "my-show", "ep": 2}
 
 
 def test_stub_update_bumps_best_depth_only_when_deeper():
     # Current best is "mentioned"; new ep covers at "deep-dive" → should bump
     concept = {"depth_this_episode": "deep-dive"}
-    result = compute_stub_update(dict(_BASE_STUB_FM), concept, episode_id=4)
+    result = compute_stub_update(dict(_BASE_STUB_FM), concept, episode_id=4, show_id="my-show")
     assert result is not None
     assert result["best_depth"] == "deep-dive"
-    assert result["best_depth_episode"] == "ep-4"
+    assert result["best_depth_episode"] == {"show": "my-show", "ep": 4}
 
     # New ep covers at "mentioned" (same as stored best) → should NOT bump best_depth
     fm2 = dict(_BASE_STUB_FM)
     fm2["best_depth"] = "deep-dive"
-    fm2["last_seen_by"] = "ep-99"  # force last_seen_by to be "stale" so we get a change
+    fm2["last_seen_by"] = {"show": "my-show", "ep": 99}  # force last_seen_by to be "stale"
     concept2 = {"depth_this_episode": "mentioned"}
-    result2 = compute_stub_update(fm2, concept2, episode_id=5)
+    result2 = compute_stub_update(fm2, concept2, episode_id=5, show_id="my-show")
     # Result may still not be None due to last_seen_by change, but best_depth stays
     if result2 is not None:
         assert result2["best_depth"] == "deep-dive"
@@ -184,27 +232,27 @@ def test_stub_update_bumps_best_depth_only_when_deeper():
 
 def test_stub_update_preserves_created_by():
     concept = {"depth_this_episode": "deep-dive"}
-    result = compute_stub_update(dict(_BASE_STUB_FM), concept, episode_id=7)
+    result = compute_stub_update(dict(_BASE_STUB_FM), concept, episode_id=7, show_id="my-show")
     assert result is not None
     # created_by must always remain unchanged
-    assert result["created_by"] == "ep-1"
+    assert result["created_by"] == {"show": "my-show", "ep": 1}
 
 
 def test_stub_update_appends_referenced_by():
     concept = {"depth_this_episode": "mentioned"}
-    result = compute_stub_update(dict(_BASE_STUB_FM), concept, episode_id=3)
+    result = compute_stub_update(dict(_BASE_STUB_FM), concept, episode_id=3, show_id="my-show")
     assert result is not None
-    assert "ep-3" in result["referenced_by"]
-    assert "ep-1" in result["referenced_by"]  # original preserved
+    assert {"show": "my-show", "ep": 3} in result["referenced_by"]
+    assert {"show": "my-show", "ep": 1} in result["referenced_by"]  # original preserved
 
 
 def test_stub_update_returns_none_on_noop():
     # Stub already has ep-2 as last_seen_by, best_depth=mentioned, referenced_by includes ep-2
     fm = dict(_BASE_STUB_FM)
-    fm["last_seen_by"] = "ep-2"
-    fm["referenced_by"] = ["ep-1", "ep-2"]
+    fm["last_seen_by"] = {"show": "my-show", "ep": 2}
+    fm["referenced_by"] = [{"show": "my-show", "ep": 1}, {"show": "my-show", "ep": 2}]
     concept = {"depth_this_episode": "mentioned"}
-    result = compute_stub_update(fm, concept, episode_id=2)
+    result = compute_stub_update(fm, concept, episode_id=2, show_id="my-show")
     assert result is None
 
 
@@ -1160,3 +1208,473 @@ def test_judge_requires_haiku_call_and_template(tmp_path):
     (wiki / "episodes").mkdir(parents=True)
     with pytest.raises(RuntimeError):
         judge_candidate_episode(wiki_dir=wiki, candidate_concepts=["x"])
+
+
+# ---------------------------------------------------------------------------
+# Tasks 6-9: Multi-show integration tests
+# ---------------------------------------------------------------------------
+
+import sys as _sys
+_SCRIPTS_DIR_SHOWS = str(Path(__file__).resolve().parent.parent)
+if _SCRIPTS_DIR_SHOWS not in _sys.path:
+    _sys.path.insert(0, _SCRIPTS_DIR_SHOWS)
+
+from shows import Show, EpRef
+from episode_wiki import (
+    MixedShowCoverageError,
+    resolve_episode_wikilink,
+    validate_body_wikilinks,
+)
+
+
+def _make_show(show_id: str = "quanzhan-ai") -> Show:
+    """Create a minimal Show for tests."""
+    return Show(
+        id=show_id,
+        title="全栈AI",
+        description="Test show",
+        default=True,
+        language="zh_Hans",
+        hosts=["A", "B"],
+        extra_host_names=[],
+        intro_music=None,
+        intro_music_length_seconds=12,
+        intro_crossfade_seconds=3,
+        podcast_format="deep-dive",
+        podcast_length="long",
+        transcript={"enabled": False, "model": "", "device": "auto", "language": "zh"},
+        episodes_registry="episodes.yaml",
+        wiki_episodes_dir=f"episodes/{show_id}",
+        xiaoyuzhou={},
+    )
+
+
+def _write_show_episode(wiki_path: Path, show: Show, ep_id: int, slug: str) -> Path:
+    """Write a minimal show-scoped episode article and return its path."""
+    ep_dir = wiki_path / show.wiki_episodes_dir
+    ep_dir.mkdir(parents=True, exist_ok=True)
+    ep_file = ep_dir / f"ep-{ep_id}-{slug}.md"
+    ep_file.write_text(
+        f"---\n"
+        f"title: 'EP{ep_id} | Test'\n"
+        f"episode_id: {ep_id}\n"
+        f"audio_file: a.mp3\n"
+        f"transcript_file: a.transcript.md\n"
+        f"date: 2026-04-21\n"
+        f"depth: deep-dive\n"
+        f"tags: [episode]\n"
+        f"aliases: []\n"
+        f"source_lessons: []\n"
+        f"index:\n"
+        f"  schema_version: 1\n"
+        f"  summary: 'Test.'\n"
+        f"  concepts: []\n"
+        f"  open_threads: []\n"
+        f"  series_links:\n"
+        f"    builds_on: []\n"
+        f"    followup_candidates: []\n"
+        f"---\n\n# EP{ep_id} | Test\n",
+        encoding="utf-8",
+    )
+    return ep_file
+
+
+# --- Task 6: scan_episode_wiki show-scoped ---
+
+def test_scan_episode_wiki_show_scoped(tmp_path):
+    """scan_episode_wiki with a Show scopes results to that show's directory."""
+    wiki = tmp_path / "wiki"
+    show_a = _make_show("show-a")
+    show_b = _make_show("show-b")
+
+    _write_show_episode(wiki, show_a, 1, "topic-a")
+    _write_show_episode(wiki, show_b, 2, "topic-b")
+
+    eps_a = scan_episode_wiki(wiki, show_a)
+    eps_b = scan_episode_wiki(wiki, show_b)
+
+    assert len(eps_a) == 1
+    assert eps_a[0].episode_id == 1
+    assert eps_a[0].show_id == "show-a"
+
+    assert len(eps_b) == 1
+    assert eps_b[0].episode_id == 2
+    assert eps_b[0].show_id == "show-b"
+
+
+def test_scan_episode_wiki_does_not_leak_across_shows(tmp_path):
+    """Scanning for show A must not return show B's episodes."""
+    wiki = tmp_path / "wiki"
+    show_a = _make_show("show-a")
+    show_b = _make_show("show-b")
+
+    _write_show_episode(wiki, show_a, 1, "topic-a")
+    _write_show_episode(wiki, show_b, 1, "topic-b")  # same ep_id, different show
+
+    eps_a = scan_episode_wiki(wiki, show_a)
+    # Only show-a's episode is returned
+    assert all(e.show_id == "show-a" for e in eps_a)
+    assert len(eps_a) == 1
+    assert eps_a[0].episode_id == 1
+
+
+def test_scan_episode_wiki_populates_show_id_field(tmp_path):
+    """IndexedEpisode.show_id must be set from the passed Show."""
+    wiki = tmp_path / "wiki"
+    show = _make_show("quanzhan-ai")
+    _write_show_episode(wiki, show, 5, "deep-dive-ep")
+    eps = scan_episode_wiki(wiki, show)
+    assert len(eps) == 1
+    assert eps[0].show_id == "quanzhan-ai"
+
+
+# --- Task 6: resolve_episode_wikilink ---
+
+def test_resolve_episode_wikilink_happy_path(tmp_path):
+    """Returns wiki/episodes/<show>/ep-N-<slug> from the on-disk file."""
+    wiki = tmp_path / "wiki"
+    show = _make_show("quanzhan-ai")
+    _write_show_episode(wiki, show, 3, "kv-cache")
+    shows_by_id = {"quanzhan-ai": show}
+    ref = EpRef(show="quanzhan-ai", ep=3)
+    result = resolve_episode_wikilink(ref, shows_by_id, wiki)
+    assert result == "wiki/episodes/quanzhan-ai/ep-3-kv-cache"
+
+
+def test_resolve_episode_wikilink_unknown_show(tmp_path):
+    """Raises UnknownShowError when ref.show is not in shows_by_id."""
+    from shows import UnknownShowError
+    wiki = tmp_path / "wiki"
+    ref = EpRef(show="nonexistent-show", ep=1)
+    with pytest.raises(UnknownShowError, match="nonexistent-show"):
+        resolve_episode_wikilink(ref, {}, wiki)
+
+
+def test_resolve_episode_wikilink_file_not_found(tmp_path):
+    """Raises FileNotFoundError when no matching ep-<N>-*.md file exists."""
+    wiki = tmp_path / "wiki"
+    show = _make_show("quanzhan-ai")
+    (wiki / show.wiki_episodes_dir).mkdir(parents=True)  # dir exists but empty
+    shows_by_id = {"quanzhan-ai": show}
+    ref = EpRef(show="quanzhan-ai", ep=99)
+    with pytest.raises(FileNotFoundError):
+        resolve_episode_wikilink(ref, shows_by_id, wiki)
+
+
+# --- Task 6: validate_body_wikilinks ---
+
+def test_validate_body_wikilinks_flags_legacy():
+    """Legacy flat wikilink [[wiki/episodes/ep-N-slug]] returns an error."""
+    text = "See [[wiki/episodes/ep-1-quantization]] for details."
+    errors = validate_body_wikilinks(text, known_shows={"quanzhan-ai"})
+    assert len(errors) == 1
+    assert "legacy wikilink" in errors[0]
+    assert "ep-1-quantization" in errors[0]
+
+
+def test_validate_body_wikilinks_passes_new():
+    """New show-scoped wikilink [[wiki/episodes/<show>/ep-N-slug]] returns no errors."""
+    text = "See [[wiki/episodes/quanzhan-ai/ep-1-quantization]] for details."
+    errors = validate_body_wikilinks(text, known_shows={"quanzhan-ai"})
+    assert errors == []
+
+
+def test_validate_body_wikilinks_flags_unknown_show():
+    """Show-scoped wikilink with unknown show returns an error."""
+    text = "See [[wiki/episodes/mystery-show/ep-1-topic]] here."
+    errors = validate_body_wikilinks(text, known_shows={"quanzhan-ai"})
+    assert len(errors) == 1
+    assert "unknown show in wikilink" in errors[0]
+    assert "mystery-show" in errors[0]
+
+
+def test_validate_body_wikilinks_passes_empty_text():
+    """No wikilinks → no errors."""
+    assert validate_body_wikilinks("", known_shows={"quanzhan-ai"}) == []
+
+
+def test_validate_body_wikilinks_passes_display_text_form():
+    """Display-text wikilink [[wiki/episodes/<show>/ep-N-slug|label]] passes."""
+    text = "See [[wiki/episodes/quanzhan-ai/ep-2-deep-dive|EP2]] here."
+    errors = validate_body_wikilinks(text, known_shows={"quanzhan-ai"})
+    assert errors == []
+
+
+# --- Task 7: show_id in IndexedEpisode ---
+
+def test_indexed_episode_show_id_default():
+    """IndexedEpisode.show_id defaults to empty string."""
+    ep = E.IndexedEpisode(
+        episode_id=1, title="T", date="2026-01-01", depth="intro",
+        audio_file="a.mp3", transcript_file=None,
+        concepts=[], open_threads=[], series_builds_on=[],
+        series_followup_candidates=[],
+    )
+    assert ep.show_id == ""
+
+
+# --- Task 8: renderers emit dict form ---
+
+def test_render_stub_emits_dict_form():
+    """render_stub with show_id emits {show, ep} dicts for all ref fields."""
+    import yaml as _yaml
+    concept = {
+        "slug": "wiki/attention/self-attention",
+        "depth_this_episode": "explained",
+        "what": "Attention mechanism.",
+        "why_it_matters": "Core to transformers.",
+        "key_points": ["Q, K, V"],
+        "covered_at_sec": 60.0,
+    }
+    output = render_stub(
+        slug="wiki/attention/self-attention",
+        concept=concept,
+        episode_id=3,
+        episode_slug="ep-3-attention",
+        date="2026-04-21",
+        show_id="quanzhan-ai",
+    )
+    # Parse frontmatter: output starts with "---\n", ends at second "\n---\n"
+    assert output.startswith("---\n")
+    end = output.find("\n---\n", 4)
+    assert end > 0, "Must have closing frontmatter delimiter"
+    fm = _yaml.safe_load(output[4:end])
+    # All ref fields should be dicts
+    assert fm["created_by"] == {"show": "quanzhan-ai", "ep": 3}
+    assert fm["last_seen_by"] == {"show": "quanzhan-ai", "ep": 3}
+    assert fm["best_depth_episode"] == {"show": "quanzhan-ai", "ep": 3}
+    assert fm["referenced_by"] == [{"show": "quanzhan-ai", "ep": 3}]
+
+
+def test_render_stub_without_show_id_uses_legacy_format():
+    """render_stub without show_id falls back to legacy ep-N string format."""
+    concept = {
+        "slug": "wiki/attention/self-attention",
+        "depth_this_episode": "mentioned",
+        "what": "W.", "why_it_matters": "Y.", "key_points": [],
+    }
+    output = render_stub(
+        slug="wiki/attention/self-attention",
+        concept=concept,
+        episode_id=5,
+        episode_slug="ep-5-test",
+        date="2026-04-21",
+    )
+    assert "created_by: ep-5" in output
+
+
+def test_render_episode_wiki_emits_dict_refs():
+    """render_episode_wiki emits prior_episode_ref as dict and builds_on as list of dicts."""
+    import yaml as _yaml
+    concept = {
+        "slug": "wiki/quantization/k-quants",
+        "depth_this_episode": "deep-dive",
+        "depth_delta_vs_past": "deeper",
+        "prior_episode_ref": {"show": "quanzhan-ai", "ep": 1},
+        "what": "Group-wise quantization.",
+        "why_it_matters": "Enables 4-bit inference.",
+        "key_points": ["Groups into blocks"],
+        "covered_at_sec": 252.0,
+        "existed_before": True,
+    }
+    output = render_episode_wiki(
+        episode_id=3,
+        title="EP3 | 量化",
+        date="2026-04-21",
+        depth="deep-dive",
+        audio_file="podcast-quantization.mp3",
+        transcript_file="podcast-quantization.transcript.md",
+        summary="A deep dive.",
+        concepts=[concept],
+        open_threads=[],
+        series_builds_on=[{"show": "quanzhan-ai", "ep": 1}],
+        series_followup_candidates=[],
+        source_lessons=[],
+        tags=["episode"],
+        show_id="quanzhan-ai",
+    )
+    end = output.find("\n---\n", 4)
+    fm = _yaml.safe_load(output[4:end])
+    idx = fm["index"]
+    # prior_episode_ref must be a dict
+    assert idx["concepts"][0]["prior_episode_ref"] == {"show": "quanzhan-ai", "ep": 1}
+    # series_links.builds_on must be a list of dicts
+    assert idx["series_links"]["builds_on"] == [{"show": "quanzhan-ai", "ep": 1}]
+
+
+# --- Task 9: parse new dict form on read; fail on legacy ---
+
+def test_parser_rejects_legacy_ref_str(tmp_path):
+    """Episode article with prior_episode_ref: 'ep-3' (legacy str) raises MigrationRequiredError."""
+    from shows import MigrationRequiredError
+    ep_dir = tmp_path / "episodes" / "quanzhan-ai"
+    ep_dir.mkdir(parents=True)
+    ep_file = ep_dir / "ep-5-test.md"
+    ep_file.write_text(
+        "---\n"
+        "title: 'EP5 | Test'\n"
+        "episode_id: 5\n"
+        "audio_file: a.mp3\n"
+        "transcript_file: a.transcript.md\n"
+        "date: 2026-04-21\n"
+        "depth: explained\n"
+        "tags: [episode]\n"
+        "aliases: []\n"
+        "source_lessons: []\n"
+        "index:\n"
+        "  schema_version: 1\n"
+        "  summary: 'Test.'\n"
+        "  concepts:\n"
+        "    - slug: wiki/foo/bar\n"
+        "      depth_this_episode: explained\n"
+        "      depth_delta_vs_past: deeper\n"
+        "      prior_episode_ref: 'ep-3'\n"
+        "      what: 'W.'\n"
+        "      why_it_matters: 'Y.'\n"
+        "      key_points: []\n"
+        "      covered_at_sec: null\n"
+        "      existed_before: true\n"
+        "  open_threads: []\n"
+        "  series_links:\n"
+        "    builds_on: []\n"
+        "    followup_candidates: []\n"
+        "---\n\n# EP5\n",
+        encoding="utf-8",
+    )
+    show = _make_show("quanzhan-ai")
+    wiki = tmp_path
+    with pytest.raises(MigrationRequiredError):
+        scan_episode_wiki(wiki, show, strict=True)
+
+
+def test_parser_rejects_legacy_ref_int(tmp_path):
+    """Episode article with prior_episode_ref: 3 (bare int) raises MigrationRequiredError."""
+    from shows import MigrationRequiredError
+    ep_dir = tmp_path / "episodes" / "quanzhan-ai"
+    ep_dir.mkdir(parents=True)
+    ep_file = ep_dir / "ep-5-test.md"
+    ep_file.write_text(
+        "---\n"
+        "title: 'EP5 | Test'\n"
+        "episode_id: 5\n"
+        "audio_file: a.mp3\n"
+        "transcript_file: a.transcript.md\n"
+        "date: 2026-04-21\n"
+        "depth: explained\n"
+        "tags: [episode]\n"
+        "aliases: []\n"
+        "source_lessons: []\n"
+        "index:\n"
+        "  schema_version: 1\n"
+        "  summary: 'Test.'\n"
+        "  concepts:\n"
+        "    - slug: wiki/foo/bar\n"
+        "      depth_this_episode: explained\n"
+        "      depth_delta_vs_past: deeper\n"
+        "      prior_episode_ref: 3\n"
+        "      what: 'W.'\n"
+        "      why_it_matters: 'Y.'\n"
+        "      key_points: []\n"
+        "      covered_at_sec: null\n"
+        "      existed_before: true\n"
+        "  open_threads: []\n"
+        "  series_links:\n"
+        "    builds_on: []\n"
+        "    followup_candidates: []\n"
+        "---\n\n# EP5\n",
+        encoding="utf-8",
+    )
+    show = _make_show("quanzhan-ai")
+    wiki = tmp_path
+    with pytest.raises(MigrationRequiredError):
+        scan_episode_wiki(wiki, show, strict=True)
+
+
+def test_parser_accepts_dict_ref(tmp_path):
+    """Episode article with prior_episode_ref: {show, ep} dict parses cleanly."""
+    ep_dir = tmp_path / "episodes" / "quanzhan-ai"
+    ep_dir.mkdir(parents=True)
+    ep_file = ep_dir / "ep-5-test.md"
+    ep_file.write_text(
+        "---\n"
+        "title: 'EP5 | Test'\n"
+        "episode_id: 5\n"
+        "audio_file: a.mp3\n"
+        "transcript_file: a.transcript.md\n"
+        "date: 2026-04-21\n"
+        "depth: explained\n"
+        "tags: [episode]\n"
+        "aliases: []\n"
+        "source_lessons: []\n"
+        "index:\n"
+        "  schema_version: 1\n"
+        "  summary: 'Test.'\n"
+        "  concepts:\n"
+        "    - slug: wiki/foo/bar\n"
+        "      depth_this_episode: explained\n"
+        "      depth_delta_vs_past: deeper\n"
+        "      prior_episode_ref:\n"
+        "        show: quanzhan-ai\n"
+        "        ep: 3\n"
+        "      what: 'W.'\n"
+        "      why_it_matters: 'Y.'\n"
+        "      key_points: []\n"
+        "      covered_at_sec: null\n"
+        "      existed_before: true\n"
+        "  open_threads: []\n"
+        "  series_links:\n"
+        "    builds_on: []\n"
+        "    followup_candidates: []\n"
+        "---\n\n# EP5\n",
+        encoding="utf-8",
+    )
+    show = _make_show("quanzhan-ai")
+    wiki = tmp_path
+    eps = scan_episode_wiki(wiki, show, strict=True)
+    assert len(eps) == 1
+    assert eps[0].concepts[0].prior_episode_ref == {"show": "quanzhan-ai", "ep": 3}
+
+
+def test_parser_rejects_unknown_show_in_dict_ref(tmp_path):
+    """prior_episode_ref dict with show not in known_shows raises UnknownShowError."""
+    from shows import UnknownShowError
+    ep_dir = tmp_path / "episodes" / "quanzhan-ai"
+    ep_dir.mkdir(parents=True)
+    ep_file = ep_dir / "ep-5-test.md"
+    ep_file.write_text(
+        "---\n"
+        "title: 'EP5 | Test'\n"
+        "episode_id: 5\n"
+        "audio_file: a.mp3\n"
+        "transcript_file: a.transcript.md\n"
+        "date: 2026-04-21\n"
+        "depth: explained\n"
+        "tags: [episode]\n"
+        "aliases: []\n"
+        "source_lessons: []\n"
+        "index:\n"
+        "  schema_version: 1\n"
+        "  summary: 'Test.'\n"
+        "  concepts:\n"
+        "    - slug: wiki/foo/bar\n"
+        "      depth_this_episode: explained\n"
+        "      depth_delta_vs_past: deeper\n"
+        "      prior_episode_ref:\n"
+        "        show: other-show\n"
+        "        ep: 3\n"
+        "      what: 'W.'\n"
+        "      why_it_matters: 'Y.'\n"
+        "      key_points: []\n"
+        "      covered_at_sec: null\n"
+        "      existed_before: true\n"
+        "  open_threads: []\n"
+        "  series_links:\n"
+        "    builds_on: []\n"
+        "    followup_candidates: []\n"
+        "---\n\n# EP5\n",
+        encoding="utf-8",
+    )
+    show = _make_show("quanzhan-ai")
+    wiki = tmp_path
+    with pytest.raises(UnknownShowError):
+        scan_episode_wiki(wiki, show, strict=True)

@@ -10,6 +10,7 @@ This module is split into layers that are added incrementally across tasks:
   Task 4 — transactional core: index_episode_transactional, staging_dir, atomic_replace_index.
   Task 5 — orchestration: orchestrate_episode_index (Haiku-injected callable).
   Task 6 — dedup judge: judge_candidate_episode.
+  Tasks 6-9 (multi-show) — show-scoped scan, EpRef dict form throughout, new helpers.
 """
 from __future__ import annotations
 
@@ -24,6 +25,11 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
 import yaml
+
+from shows import (
+    EpRef, Show, UnknownShowError, MigrationRequiredError,
+    ShowConfigError, parse_ep_ref_field,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -40,6 +46,10 @@ class EpisodeParseError(ValueError):
 
 class TransactionAbortedError(RuntimeError):
     """Raised when a transactional index operation fails before committing."""
+
+
+class MixedShowCoverageError(ShowConfigError):
+    """Raised when compute_depth_deltas receives indexed entries for multiple shows."""
 
 
 # ---------------------------------------------------------------------------
@@ -67,7 +77,7 @@ class IndexedConcept:
     slug: str                       # e.g. "wiki/quantization/k-quants"
     depth_this_episode: str         # mentioned | explained | deep-dive
     depth_delta_vs_past: str        # new | deeper | same | lighter
-    prior_episode_ref: int | None
+    prior_episode_ref: dict | None  # {show, ep} dict or None
     what: str
     why_it_matters: str
     key_points: list[str]
@@ -91,8 +101,9 @@ class IndexedEpisode:
     transcript_file: str | None
     concepts: list[IndexedConcept]
     open_threads: list[OpenThread]
-    series_builds_on: list[str]
+    series_builds_on: list[dict]        # list of {show, ep} dicts
     series_followup_candidates: list[str]
+    show_id: str = ""                   # populated by scan_episode_wiki from the passed Show.id
 
 
 @dataclass
@@ -153,20 +164,42 @@ def slug_to_wiki_relative_path(slug: str) -> Path:
 # ---------------------------------------------------------------------------
 
 def compute_depth_deltas(
-    concepts: list[dict],
-    coverage_map: dict[str, list[dict]],
+    current_episode_show_id: str,
+    current_concepts: list[dict],
+    indexed: list[IndexedEpisode],
 ) -> list[dict]:
-    """Given raw extracted concepts and a coverage_map from prior episodes,
-    return concepts with depth_delta_vs_past and prior_episode_ref filled in.
+    """Given raw extracted concepts and a list of prior IndexedEpisodes for the
+    same show, return concepts with depth_delta_vs_past and prior_episode_ref filled in.
 
-    coverage_map format: {slug: [{ep_id, depth, key_points, date}, ...]}
+    prior_episode_ref is emitted as a {show, ep} dict.
+
+    Raises MixedShowCoverageError if any entry in `indexed` has a different show_id
+    than current_episode_show_id. Hard fail — do NOT silently filter.
 
     Tie-breaking rule: when multiple prior episodes share the same deepest
-    depth, prior_episode_ref resolves to the one with the LOWEST ep_id
+    depth, prior_episode_ref resolves to the one with the LOWEST episode_id
     (matches publish chronology, deterministic).
     """
+    # Validate that all indexed episodes belong to the same show.
+    for ep in indexed:
+        if ep.show_id != current_episode_show_id:
+            raise MixedShowCoverageError(
+                f"coverage_map contains show {ep.show_id!r}, expected {current_episode_show_id!r}"
+            )
+
+    # Build coverage map from indexed episodes: {slug: [{ep_id, depth, key_points, date}, ...]}
+    coverage_map: dict[str, list[dict]] = {}
+    for ep in indexed:
+        for c in ep.concepts:
+            coverage_map.setdefault(c.slug, []).append({
+                "ep_id": ep.episode_id,
+                "depth": c.depth_this_episode,
+                "key_points": list(c.key_points),
+                "date": ep.date,
+            })
+
     out = []
-    for c in concepts:
+    for c in current_concepts:
         c = dict(c)
         priors = coverage_map.get(c["slug"], [])
         if not priors:
@@ -185,7 +218,8 @@ def compute_depth_deltas(
                 c["depth_delta_vs_past"] = "same"
             else:
                 c["depth_delta_vs_past"] = "lighter"
-            c["prior_episode_ref"] = deepest["ep_id"]
+            # Emit as {show, ep} dict
+            c["prior_episode_ref"] = {"show": current_episode_show_id, "ep": deepest["ep_id"]}
         out.append(c)
     return out
 
@@ -198,6 +232,7 @@ def compute_stub_update(
     existing_frontmatter: dict,
     concept: dict,
     episode_id: int,
+    show_id: str,
 ) -> dict | None:
     """Compute the updated frontmatter for an existing stub, or None if no change.
 
@@ -207,15 +242,23 @@ def compute_stub_update(
     - Appends `referenced_by` if this episode isn't already in the list.
     - NEVER modifies `created_by` (immutable provenance).
 
+    All episode refs emitted as {show, ep} dicts.
+
     Returns the full updated frontmatter dict on change, None on no-op.
     """
     fm = dict(existing_frontmatter)
     changed = False
-    ep_tag = f"ep-{episode_id}"
+    ep_ref_dict = {"show": show_id, "ep": episode_id}
+
+    def _ref_matches(existing_val, ref_dict: dict) -> bool:
+        """Check whether existing_val (already stored) matches the new ref dict."""
+        if isinstance(existing_val, dict):
+            return existing_val.get("show") == ref_dict["show"] and existing_val.get("ep") == ref_dict["ep"]
+        return False
 
     # Always update last_seen_by
-    if fm.get("last_seen_by") != ep_tag:
-        fm["last_seen_by"] = ep_tag
+    if not _ref_matches(fm.get("last_seen_by"), ep_ref_dict):
+        fm["last_seen_by"] = ep_ref_dict
         changed = True
 
     # Update best_depth only when new depth is strictly greater
@@ -225,13 +268,17 @@ def compute_stub_update(
     new_depth_val = _DEPTH_ORDER.get(new_depth, 0)
     if new_depth_val > existing_best:
         fm["best_depth"] = new_depth
-        fm["best_depth_episode"] = ep_tag
+        fm["best_depth_episode"] = ep_ref_dict
         changed = True
 
     # Append to referenced_by if not already present
     referenced_by = list(fm.get("referenced_by") or [])
-    if ep_tag not in referenced_by:
-        referenced_by.append(ep_tag)
+    already_present = any(
+        (isinstance(r, dict) and r.get("show") == ep_ref_dict["show"] and r.get("ep") == ep_ref_dict["ep"])
+        for r in referenced_by
+    )
+    if not already_present:
+        referenced_by.append(ep_ref_dict)
         fm["referenced_by"] = referenced_by
         changed = True
 
@@ -332,6 +379,96 @@ def resolve_concept_candidate(
 
 
 # ---------------------------------------------------------------------------
+# New helpers: resolve_episode_wikilink, validate_body_wikilinks (Task 6)
+# ---------------------------------------------------------------------------
+
+def resolve_episode_wikilink(
+    ref: EpRef,
+    shows_by_id: dict[str, Show],
+    wiki_path: Path,
+) -> str:
+    """Resolve an EpRef to a wikilink stem by looking up the episode file on disk.
+
+    Looks up shows_by_id[ref.show] (raises UnknownShowError if not found),
+    then globs wiki_path / show.wiki_episodes_dir / f"ep-{ref.ep}-*.md" to
+    recover the slug from the filename stem (strips ep-<N>- prefix).
+
+    Returns ref.wikilink_stem(slug).
+
+    Raises:
+      UnknownShowError: if ref.show not in shows_by_id
+      FileNotFoundError: if no matching ep-<N>-*.md file is found
+      ValueError: if multiple matching files are found (ambiguous)
+    """
+    if ref.show not in shows_by_id:
+        raise UnknownShowError(
+            f"show {ref.show!r} not in shows_by_id {sorted(shows_by_id)}"
+        )
+    show = shows_by_id[ref.show]
+    ep_dir = wiki_path / show.wiki_episodes_dir
+    matches = list(ep_dir.glob(f"ep-{ref.ep}-*.md"))
+    if not matches:
+        raise FileNotFoundError(
+            f"no episode file found for ep-{ref.ep} under {ep_dir}"
+        )
+    if len(matches) > 1:
+        names = [m.name for m in matches]
+        raise ValueError(
+            f"multiple episode files found for ep-{ref.ep} under {ep_dir}: {names}"
+        )
+    # Extract slug: strip "ep-<N>-" prefix and ".md" suffix
+    stem = matches[0].stem  # e.g. "ep-3-quantization"
+    prefix = f"ep-{ref.ep}-"
+    if stem.startswith(prefix):
+        slug = stem[len(prefix):]
+    else:
+        slug = stem
+    return ref.wikilink_stem(slug)
+
+
+# Regex to match episode wikilinks (with or without display text)
+# Matches: [[wiki/episodes/ep-N-slug]] (legacy flat)
+#      and [[wiki/episodes/<show>/ep-N-slug]] (new show-scoped)
+# Capture groups: (path_without_display_text)
+_EPISODE_WIKILINK_RE = re.compile(
+    r"\[\[wiki/episodes/"
+    r"((?:ep-\d+|[a-z][a-z0-9-]*/ep-\d+)[^\]|]*)"
+    r"(?:\|[^\]]*)?"
+    r"\]\]"
+)
+
+# Legacy flat pattern: wiki/episodes/ep-N-...  (no show sub-path)
+_LEGACY_EP_RE = re.compile(r"^ep-\d+")
+# Show-scoped pattern: <show>/ep-N-...
+_SHOW_SCOPED_EP_RE = re.compile(r"^([a-z][a-z0-9-]*)/ep-\d+")
+
+
+def validate_body_wikilinks(text: str, known_shows: set[str]) -> list[str]:
+    """Scan `text` for episode wikilinks and return a list of error strings.
+
+    Error conditions:
+    - Legacy flat path [[wiki/episodes/ep-N-<slug>...]] → "legacy wikilink: <match>"
+    - Show-scoped path [[wiki/episodes/<show>/ep-N-...]] where <show> not in
+      known_shows → "unknown show in wikilink: <show>"
+
+    Returns an empty list on success (no errors).
+    """
+    errors: list[str] = []
+    for m in _EPISODE_WIKILINK_RE.finditer(text):
+        path = m.group(1)  # everything after "wiki/episodes/" up to | or ]]
+        full_match = m.group(0)
+        if _LEGACY_EP_RE.match(path):
+            errors.append(f"legacy wikilink: {full_match}")
+        else:
+            sm = _SHOW_SCOPED_EP_RE.match(path)
+            if sm:
+                show_token = sm.group(1)
+                if show_token not in known_shows:
+                    errors.append(f"unknown show in wikilink: {show_token}")
+    return errors
+
+
+# ---------------------------------------------------------------------------
 # Rendering (pure, no I/O)
 # ---------------------------------------------------------------------------
 
@@ -341,13 +478,21 @@ def render_stub(
     episode_id: int,
     episode_slug: str,
     date: str,
+    show_id: str = "",
 ) -> str:
     """Deterministically render a stub article (frontmatter + body).
 
     Pure function — no filesystem writes. The caller is responsible for writing
     the returned string to the correct path.
+
+    All episode refs emitted as {show, ep} dicts when show_id is provided.
     """
-    ep_tag = f"ep-{episode_id}"
+    ep_ref: Any
+    if show_id:
+        ep_ref = {"show": show_id, "ep": episode_id}
+    else:
+        ep_ref = f"ep-{episode_id}"
+
     # Derive a human-readable title from the slug's last component
     title = slug.rsplit("/", 1)[-1].replace("-", " ").replace("_", " ").title()
 
@@ -356,18 +501,24 @@ def render_stub(
         "tags": ["stub"],
         "aliases": [],
         "status": "stub",
-        "created_by": ep_tag,           # immutable provenance
-        "last_seen_by": ep_tag,
-        "best_depth_episode": ep_tag,
+        "created_by": ep_ref,           # immutable provenance
+        "last_seen_by": ep_ref,
+        "best_depth_episode": ep_ref,
         "best_depth": concept.get("depth_this_episode", "mentioned"),
-        "referenced_by": [ep_tag],
+        "referenced_by": [ep_ref],
         "created": date,
     }
+
+    # Build episode link — show-scoped if show_id available
+    if show_id:
+        ep_link = f"wiki/episodes/{show_id}/{episode_slug}"
+    else:
+        ep_link = f"wiki/episodes/{episode_slug}"
 
     body = (
         f"# {title}\n\n"
         f"> **Stub.** Auto-created by `kb-publish` while indexing "
-        f"[[wiki/episodes/{episode_slug}]]. "
+        f"[[{ep_link}]]. "
         f"It will be fleshed out the next time this concept appears in compile/lint, "
         f"or when you write about it manually.\n\n"
         f"## What the introducing episode said\n\n"
@@ -375,7 +526,7 @@ def render_stub(
         f"## Why it matters\n\n"
         f"{concept.get('why_it_matters', '')}\n\n"
         f"## Referenced by\n\n"
-        f"- Introduced in: [[wiki/episodes/{episode_slug}]]\n"
+        f"- Introduced in: [[{ep_link}]]\n"
     )
 
     return "---\n" + yaml.safe_dump(fm, allow_unicode=True, sort_keys=False) + "---\n\n" + body
@@ -391,17 +542,21 @@ def render_episode_wiki(
     summary: str,
     concepts: list[dict],
     open_threads: list[dict],
-    series_builds_on: list[str],
+    series_builds_on: list[Any],
     series_followup_candidates: list[str],
     source_lessons: list[str],
     tags: list[str],
     aliases: list[str] | None = None,
+    show_id: str = "",
 ) -> str:
     """Deterministic markdown rendering of an episode index record.
 
     The frontmatter carries the machine-readable `index:` block (parsed by
     scan_episode_wiki). The body below the frontmatter is rendered markdown
     for human reading in Obsidian.
+
+    series_builds_on: list of {show, ep} dicts (or legacy strings for compat).
+    All episode-level refs emitted as {show, ep} dicts when show_id is provided.
     """
     index_block: dict[str, Any] = {
         "schema_version": 1,
@@ -437,6 +592,7 @@ def render_episode_wiki(
         open_threads=open_threads,
         builds_on=series_builds_on,
         followups=series_followup_candidates,
+        show_id=show_id,
     )
     return "---\n" + yaml.safe_dump(fm, allow_unicode=True, sort_keys=False) + "---\n\n" + body
 
@@ -450,8 +606,9 @@ def _render_body(
     summary: str,
     concepts: list[dict],
     open_threads: list[dict],
-    builds_on: list[str],
+    builds_on: list[Any],
     followups: list[str],
+    show_id: str = "",
 ) -> str:
     """Render the human-readable markdown body below the frontmatter."""
     parts: list[str] = []
@@ -500,7 +657,13 @@ def _render_body(
     if builds_on or followups:
         parts.append("## Series Links\n\n")
         for b in builds_on:
-            parts.append(f"- Builds on: [[{b}]]\n")
+            if isinstance(b, dict):
+                # New dict form — build wikilink from show+ep
+                show = b.get("show", show_id)
+                ep = b.get("ep", "")
+                parts.append(f"- Builds on: [[wiki/episodes/{show}/ep-{ep}]]\n")
+            else:
+                parts.append(f"- Builds on: [[{b}]]\n")
         for f in followups:
             parts.append(f"- Follow-up candidate: {f}\n")
         parts.append("\n")
@@ -518,10 +681,21 @@ log = logging.getLogger(__name__)
 
 
 def scan_episode_wiki(
-    wiki_dir: Path,
+    wiki_path: Path,
+    show: Show | None = None,
     strict: bool = False,
+    # Legacy keyword-only alias so older call sites that passed wiki_dir still
+    # work during transition. Removed once all callers updated.
+    **kwargs: Any,
 ) -> list[IndexedEpisode]:
-    """Parse all wiki/episodes/*.md files into structured records, sorted by episode_id.
+    """Parse all episode articles for the given show into structured records.
+
+    New signature: scan_episode_wiki(wiki_path, show, *, strict=False)
+      - walks wiki_path / show.wiki_episodes_dir, globs ep-*.md
+      - populates IndexedEpisode.show_id from show.id
+
+    Legacy compatibility: if show is None, falls back to wiki_path/episodes/*.md
+    (useful during smoke-parse inside staging where no Show object is available).
 
     strict=False (default): malformed frontmatter or missing `index` block logs
     a warning and skips the file. Used by dedup at podcast-generation time.
@@ -529,14 +703,33 @@ def scan_episode_wiki(
     strict=True: any parse failure raises EpisodeParseError. Used by reindex
     staging smoke-parse.
     """
-    ep_dir = wiki_dir / "episodes"
+    # Handle legacy call: scan_episode_wiki(wiki_dir, strict=bool)
+    # Detect if caller passed strict as second positional arg (old API).
+    if isinstance(show, bool):
+        # Caller used old positional API: scan_episode_wiki(wiki_dir, strict)
+        strict = show
+        show = None
+
+    if show is not None:
+        ep_dir = wiki_path / show.wiki_episodes_dir
+        show_id = show.id
+    else:
+        ep_dir = wiki_path / "episodes"
+        show_id = ""
+
     if not ep_dir.is_dir():
         return []
     out: list[IndexedEpisode] = []
-    for fp in sorted(ep_dir.glob("*.md")):
+    # Only match ep-*.md files (not subdirectories)
+    for fp in sorted(ep_dir.glob("ep-*.md")):
         try:
-            ep = _parse_episode_article(fp)
+            ep = _parse_episode_article(fp, known_shows={show_id} if show_id else None)
+            ep.show_id = show_id
             out.append(ep)
+        except (MigrationRequiredError, UnknownShowError):
+            # These are always propagated directly — they signal a data problem
+            # that requires action, not just a malformed file to skip.
+            raise
         except Exception as e:
             if strict:
                 raise EpisodeParseError(f"{fp.name}: {e}") from e
@@ -545,7 +738,18 @@ def scan_episode_wiki(
     return out
 
 
-def _parse_episode_article(path: Path) -> IndexedEpisode:
+def _parse_episode_article(
+    path: Path,
+    known_shows: set[str] | None = None,
+) -> IndexedEpisode:
+    """Parse a single episode article .md file.
+
+    known_shows: set of valid show IDs for parsing EpRef fields.
+    If None, legacy null/omitted refs are tolerated (for backward compat
+    during initial migration where prior_episode_ref may be null).
+    If provided, dict-form EpRef fields are validated; legacy str/int
+    refs raise MigrationRequiredError.
+    """
     text = path.read_text(encoding="utf-8")
     if not text.startswith("---\n"):
         raise EpisodeParseError("no frontmatter")
@@ -561,11 +765,18 @@ def _parse_episode_article(path: Path) -> IndexedEpisode:
     idx = fm.get("index") or {}
     concepts = []
     for c in idx.get("concepts", []) or []:
+        prior_ref_raw = c.get("prior_episode_ref")
+        if prior_ref_raw is not None and known_shows is not None:
+            # Parse and validate; raises MigrationRequiredError on legacy str/int
+            parsed_ref = parse_ep_ref_field(prior_ref_raw, known_shows=known_shows)
+            prior_ref = parsed_ref.to_dict()
+        else:
+            prior_ref = prior_ref_raw  # None or unparsed (legacy compat)
         concepts.append(IndexedConcept(
             slug=c.get("slug", ""),
             depth_this_episode=c.get("depth_this_episode", "mentioned"),
             depth_delta_vs_past=c.get("depth_delta_vs_past", "new"),
-            prior_episode_ref=c.get("prior_episode_ref"),
+            prior_episode_ref=prior_ref,
             what=c.get("what", ""),
             why_it_matters=c.get("why_it_matters", ""),
             key_points=list(c.get("key_points") or []),
@@ -579,6 +790,18 @@ def _parse_episode_article(path: Path) -> IndexedEpisode:
             existed_before=bool(t.get("existed_before", False)),
         ))
     sl = idx.get("series_links") or {}
+    builds_on_raw = list(sl.get("builds_on") or [])
+    builds_on: list[Any] = []
+    for b in builds_on_raw:
+        if b is None:
+            continue
+        if isinstance(b, dict) and known_shows is not None:
+            # Validate dict-form ref
+            parsed_b = parse_ep_ref_field(b, known_shows=known_shows)
+            builds_on.append(parsed_b.to_dict())
+        else:
+            builds_on.append(b)
+
     return IndexedEpisode(
         episode_id=ep_id,
         title=fm.get("title", ""),
@@ -588,8 +811,9 @@ def _parse_episode_article(path: Path) -> IndexedEpisode:
         transcript_file=fm.get("transcript_file"),
         concepts=concepts,
         open_threads=threads,
-        series_builds_on=list(sl.get("builds_on") or []),
+        series_builds_on=builds_on,
         series_followup_candidates=list(sl.get("followup_candidates") or []),
+        show_id="",  # caller sets this after return
     )
 
 
@@ -710,6 +934,7 @@ def index_episode_transactional(
     aliases: list[str],
     source_lessons: list[str],
     extraction: dict,
+    show: Show | None = None,
 ) -> TransactionalIndexResult:
     """Stage, smoke-parse, then atomically commit an episode article and concept stubs.
 
@@ -719,14 +944,28 @@ def index_episode_transactional(
 
     Commit order: stubs first (wikilinks must resolve before episode article lands),
     then other-episode stub frontmatter updates, then episode article last.
+
+    show: optional Show object; when provided, episode dir and EpRef dicts use show.
     """
+    show_id = show.id if show else ""
+
     # 1. Determine episode filename slug and validate the resulting episode slug.
     filename_slug = normalize_filename_slug(episode_topic, aliases)
-    validate_slug(f"wiki/episodes/ep-{episode_id}-{filename_slug}", allow_episode=True)
+
+    # Build the episode article path relative to wiki_dir
+    if show:
+        ep_dir_rel = show.wiki_episodes_dir  # e.g. "episodes/quanzhan-ai"
+        validate_slug(f"wiki/{ep_dir_rel}/ep-{episode_id}-{filename_slug}", allow_episode=True)
+    else:
+        ep_dir_rel = "episodes"
+        validate_slug(f"wiki/episodes/ep-{episode_id}-{filename_slug}", allow_episode=True)
+
     ep_article_basename = f"ep-{episode_id}-{filename_slug}.md"
 
     # 2. Create isolated staging area.
     staging = staging_dir(wiki_dir)
+    # Ensure the episodes subdir matches the show-scoped path
+    (staging / ep_dir_rel).mkdir(parents=True, exist_ok=True)
     new_stubs: list[str] = []
     stubs_updated: list[str] = []
     collisions_skipped: list[str] = []
@@ -742,12 +981,23 @@ def index_episode_transactional(
         for c in extraction["concepts"]:
             rel = slug_to_wiki_relative_path(c["slug"])
             dest = wiki_dir / rel
-            ep_tag = f"ep-{episode_id}"
 
             if dest.exists():
                 fm, _body = _split_frontmatter(dest.read_text(encoding="utf-8"))
                 if fm.get("status") == "stub":
-                    if fm.get("created_by") == ep_tag:
+                    # Determine if this stub was created by the current episode.
+                    # Support both old string form (ep-N) and new dict form ({show, ep}).
+                    created_by = fm.get("created_by")
+                    is_same_episode = False
+                    if isinstance(created_by, dict):
+                        is_same_episode = (
+                            created_by.get("show") == show_id and
+                            created_by.get("ep") == episode_id
+                        )
+                    elif isinstance(created_by, str):
+                        is_same_episode = (created_by == f"ep-{episode_id}")
+
+                    if is_same_episode:
                         # Same-episode reindex: fully replace the stub in staging.
                         staged = staging / rel
                         staged.parent.mkdir(parents=True, exist_ok=True)
@@ -756,13 +1006,17 @@ def index_episode_transactional(
                                 c["slug"], c, episode_id,
                                 ep_article_basename.replace(".md", ""),
                                 episode_date,
+                                show_id=show_id,
                             ),
                             encoding="utf-8",
                         )
                         stubs_updated.append(c["slug"])
                     else:
                         # Different-episode stub: frontmatter-only update at commit time.
-                        updated_fm = compute_stub_update(fm, c, episode_id)
+                        if show_id:
+                            updated_fm = compute_stub_update(fm, c, episode_id, show_id)
+                        else:
+                            updated_fm = _compute_stub_update_legacy(fm, c, episode_id)
                         if updated_fm is not None:
                             stub_updates_to_apply.append((dest, updated_fm))
                             stubs_updated.append(c["slug"])
@@ -778,6 +1032,7 @@ def index_episode_transactional(
                         c["slug"], c, episode_id,
                         ep_article_basename.replace(".md", ""),
                         episode_date,
+                        show_id=show_id,
                     ),
                     encoding="utf-8",
                 )
@@ -799,11 +1054,17 @@ def index_episode_transactional(
             source_lessons=source_lessons,
             tags=tags,
             aliases=aliases,
+            show_id=show_id,
         )
-        (staging / "episodes" / ep_article_basename).write_text(ep_md, encoding="utf-8")
+        (staging / ep_dir_rel / ep_article_basename).write_text(ep_md, encoding="utf-8")
 
         # 6. Smoke-parse staging in strict mode — aborts before any wiki writes on failure.
-        scan_episode_wiki(staging, strict=True)
+        # Pass show if available; otherwise use legacy flat scan.
+        if show:
+            scan_episode_wiki(staging, show, strict=True)
+        else:
+            # Legacy: scan the flat episodes dir
+            _scan_episode_wiki_legacy(staging, strict=True)
 
         # 7. Commit — stubs first (new/replaced), then other-ep frontmatter updates, episode last.
         for rel_md in _iter_staged_non_episode(staging):
@@ -830,9 +1091,9 @@ def index_episode_transactional(
             tmp.write_text(new_text, encoding="utf-8")
             os.replace(tmp, dest)
 
-        ep_dst = wiki_dir / "episodes" / ep_article_basename
+        ep_dst = wiki_dir / ep_dir_rel / ep_article_basename
         ep_dst.parent.mkdir(parents=True, exist_ok=True)
-        os.replace(staging / "episodes" / ep_article_basename, ep_dst)
+        os.replace(staging / ep_dir_rel / ep_article_basename, ep_dst)
 
     except (SlugValidationError, EpisodeParseError, KeyError) as e:
         raise TransactionAbortedError(str(e)) from e
@@ -845,6 +1106,63 @@ def index_episode_transactional(
         stubs_updated=stubs_updated,
         collisions_skipped=collisions_skipped,
     )
+
+
+def _compute_stub_update_legacy(
+    existing_frontmatter: dict,
+    concept: dict,
+    episode_id: int,
+) -> dict | None:
+    """Legacy (no show_id) compute_stub_update for backward compat.
+
+    Emits ep-N strings instead of {show, ep} dicts.
+    Used when no Show object is available.
+    """
+    fm = dict(existing_frontmatter)
+    changed = False
+    ep_tag = f"ep-{episode_id}"
+
+    # Always update last_seen_by
+    if fm.get("last_seen_by") != ep_tag:
+        fm["last_seen_by"] = ep_tag
+        changed = True
+
+    # Update best_depth only when new depth is strictly greater
+    existing_best_raw = fm.get("best_depth", "mentioned")
+    existing_best = _DEPTH_ORDER.get(str(existing_best_raw), 0)
+    new_depth = concept["depth_this_episode"]
+    new_depth_val = _DEPTH_ORDER.get(new_depth, 0)
+    if new_depth_val > existing_best:
+        fm["best_depth"] = new_depth
+        fm["best_depth_episode"] = ep_tag
+        changed = True
+
+    # Append to referenced_by if not already present
+    referenced_by = list(fm.get("referenced_by") or [])
+    if ep_tag not in referenced_by:
+        referenced_by.append(ep_tag)
+        fm["referenced_by"] = referenced_by
+        changed = True
+
+    return fm if changed else None
+
+
+def _scan_episode_wiki_legacy(wiki_dir: Path, strict: bool = False) -> list[IndexedEpisode]:
+    """Legacy flat scan for use during staging smoke-parse when no Show is available."""
+    ep_dir = wiki_dir / "episodes"
+    if not ep_dir.is_dir():
+        return []
+    out: list[IndexedEpisode] = []
+    for fp in sorted(ep_dir.glob("ep-*.md")):
+        try:
+            ep = _parse_episode_article(fp, known_shows=None)
+            out.append(ep)
+        except Exception as e:
+            if strict:
+                raise EpisodeParseError(f"{fp.name}: {e}") from e
+            log.warning("Skipping malformed episode %s: %s", fp.name, e)
+    out.sort(key=lambda e: e.episode_id)
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -955,6 +1273,7 @@ def orchestrate_episode_index(
     source_lessons: list[str],
     haiku_call: Callable[[str], str],
     prompt_template_path: Path,
+    show: Show | None = None,
 ) -> TransactionalIndexResult:
     """Full pipeline: read transcript, build catalog+context, call Haiku,
     validate, recompute existed_before, compute depth_deltas excluding current
@@ -964,7 +1283,13 @@ def orchestrate_episode_index(
     """
     transcript = transcript_path.read_text(encoding="utf-8")
     catalog = concept_catalog(wiki_dir, include_stubs=True)
-    all_eps = scan_episode_wiki(wiki_dir, strict=False)
+
+    # Scan episodes for the given show (or legacy flat if no show)
+    if show:
+        all_eps = scan_episode_wiki(wiki_dir, show, strict=False)
+    else:
+        all_eps = _scan_episode_wiki_legacy(wiki_dir, strict=False)
+
     # Recent-episodes context: most-recent 3 EXCLUDING the current episode.
     others = [e for e in all_eps if e.episode_id != episode_id]
     recent = sorted(others, key=lambda e: e.episode_id, reverse=True)[:3]
@@ -1024,9 +1349,14 @@ def orchestrate_episode_index(
     # raises, we abort. Here we just normalize existed_before from disk.
     data["concepts"] = _recompute_existed_before(data["concepts"], wiki_dir)
 
-    # Coverage map excluding current episode
-    coverage = concepts_covered_by_episodes(others)
-    data["concepts"] = compute_depth_deltas(data["concepts"], coverage)
+    # Coverage map excluding current episode — use new compute_depth_deltas signature
+    show_id = show.id if show else ""
+    if show_id:
+        data["concepts"] = compute_depth_deltas(show_id, data["concepts"], others)
+    else:
+        # Legacy path: no show, use old-style coverage map
+        coverage = concepts_covered_by_episodes(others)
+        data["concepts"] = _compute_depth_deltas_legacy(data["concepts"], coverage)
 
     return index_episode_transactional(
         wiki_dir=wiki_dir, episode_id=episode_id, episode_topic=episode_topic,
@@ -1034,7 +1364,38 @@ def orchestrate_episode_index(
         audio_file=audio_file, transcript_file=transcript_file,
         tags=tags, aliases=aliases, source_lessons=source_lessons,
         extraction=data,
+        show=show,
     )
+
+
+def _compute_depth_deltas_legacy(
+    concepts: list[dict],
+    coverage_map: dict[str, list[dict]],
+) -> list[dict]:
+    """Legacy compute_depth_deltas that emits prior_episode_ref as bare int.
+
+    Used when no Show object is available (pre-migration or legacy callers).
+    """
+    out = []
+    for c in concepts:
+        c = dict(c)
+        priors = coverage_map.get(c["slug"], [])
+        if not priors:
+            c["depth_delta_vs_past"] = "new"
+            c["prior_episode_ref"] = None
+        else:
+            deepest = max(priors, key=lambda p: (_DEPTH_ORDER[p["depth"]], -p["ep_id"]))
+            dp = _DEPTH_ORDER[deepest["depth"]]
+            dc = _DEPTH_ORDER[c["depth_this_episode"]]
+            if dc > dp:
+                c["depth_delta_vs_past"] = "deeper"
+            elif dc == dp:
+                c["depth_delta_vs_past"] = "same"
+            else:
+                c["depth_delta_vs_past"] = "lighter"
+            c["prior_episode_ref"] = deepest["ep_id"]
+        out.append(c)
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -1055,6 +1416,7 @@ def judge_candidate_episode(
     open_threads_allow: list[str] | None = None,
     haiku_call: Callable[[str], str] | None = None,
     prompt_template_path: Path | None = None,
+    show: Show | None = None,
 ) -> DedupJudgement:
     """Layer 3 dedup judge. Pre-computes prior-coverage per candidate then
     delegates verdict-per-candidate classification to Haiku.
@@ -1065,7 +1427,11 @@ def judge_candidate_episode(
     if haiku_call is None or prompt_template_path is None:
         raise RuntimeError("haiku_call and prompt_template_path are required")
 
-    all_eps = scan_episode_wiki(wiki_dir, strict=False)
+    if show:
+        all_eps = scan_episode_wiki(wiki_dir, show, strict=False)
+    else:
+        all_eps = _scan_episode_wiki_legacy(wiki_dir, strict=False)
+
     coverage = concepts_covered_by_episodes(all_eps)
     catalog = concept_catalog(wiki_dir, include_stubs=True)
 
