@@ -841,3 +841,217 @@ def test_phase_c_delete_ordering_safety(pre_migration_kb: Path):
 
     # .kb-migration/ must still be intact
     assert (pre_migration_kb / ".kb-migration").exists()
+
+
+# ===========================================================================
+# CLI (main()) tests — Task 18
+# ===========================================================================
+
+def _cli(project_root: Path, *extra_args: str) -> list[str]:
+    """Build a standard CLI argv list for main()."""
+    return [
+        "--project-root", str(project_root),
+        "--show-id", "quanzhan-ai",
+        "--show-title", "全栈AI",
+        "--show-hosts", "瓜瓜龙,海发菜",
+        *extra_args,
+    ]
+
+
+def test_cli_dry_run_leaves_live_tree_unchanged(pre_migration_kb: Path):
+    """--dry-run must not modify any live .md or .yaml files; staging dir must exist."""
+    import migrate_multi_show as M
+
+    # Snapshot mtimes for all .md and .yaml files before dry run
+    before_mtimes = {
+        p: p.stat().st_mtime
+        for p in pre_migration_kb.rglob("*")
+        if p.is_file() and p.suffix in (".md", ".yaml")
+        and ".kb-migration" not in str(p)
+    }
+
+    rc = M.main(_cli(pre_migration_kb, "--dry-run"))
+    assert rc == 0, f"dry-run exited with {rc}"
+
+    # Live files must be unmodified
+    for p, mtime_before in before_mtimes.items():
+        assert p.stat().st_mtime == mtime_before, \
+            f"dry-run modified live file: {p}"
+
+    # Staging directory must exist for inspection
+    staging_dir = pre_migration_kb / ".kb-migration" / "staging"
+    assert staging_dir.exists(), ".kb-migration/staging/ missing after dry-run"
+
+
+def test_cli_dry_run_with_corrupt_staging(pre_migration_kb: Path, monkeypatch):
+    """Force phase_b_validate to raise → exception propagates; live tree unchanged.
+
+    Per spec, unhandled exceptions re-raise with traceback visible.
+    A-bis is skipped in dry-run so live files are never touched.
+    """
+    import migrate_multi_show as M
+
+    before_mtimes = {
+        p: p.stat().st_mtime
+        for p in pre_migration_kb.rglob("*")
+        if p.is_file() and p.suffix in (".md", ".yaml")
+        and ".kb-migration" not in str(p)
+    }
+
+    def _failing_phase_b(project_root, plan):
+        raise ValueError("simulated Phase B failure")
+
+    monkeypatch.setattr(M, "phase_b_validate", _failing_phase_b)
+
+    # Unhandled ValueError propagates out of main() per spec
+    with pytest.raises(ValueError, match="simulated Phase B failure"):
+        M.main(_cli(pre_migration_kb, "--dry-run"))
+
+    # Live files must still be unmodified (A-bis was never called)
+    for p, mtime_before in before_mtimes.items():
+        assert p.stat().st_mtime == mtime_before, \
+            f"dry-run left live file modified after Phase B failure: {p}"
+
+
+def test_cli_acquires_lock_before_idle_check(pre_migration_kb: Path, monkeypatch):
+    """Lock is busy → LockBusyError; idle-check (load_state_file) is never called."""
+    import json
+    import migrate_multi_show as M
+    import state as state_mod
+
+    # Pre-create the lock file owned by current process (so it's "alive")
+    lock_path = pre_migration_kb / ".kb-mutation.lock"
+    lock_path.write_text(json.dumps({"pid": os.getpid(), "command": "other-cmd"}))
+
+    # Monkeypatch load_state_file to raise if ever called
+    def _should_not_be_called(*a, **kw):
+        raise AssertionError("idle-check was called before lock was acquired")
+
+    monkeypatch.setattr(state_mod, "load_state_file", _should_not_be_called)
+    # Also patch the reference inside the migrator module
+    monkeypatch.setattr(M, "load_state_file", _should_not_be_called)
+
+    rc = M.main(_cli(pre_migration_kb))
+    assert rc == 75, f"Expected exit 75 (LockBusyError), got {rc}"
+
+    # Clean up our lock
+    try:
+        lock_path.unlink()
+    except FileNotFoundError:
+        pass
+
+
+def test_cli_idle_check_raises_on_pending_runs(pre_migration_kb: Path):
+    """KB with a pending run → PendingWorkError → exit 2."""
+    import migrate_multi_show as M
+
+    # Seed .notebooklm-state.yaml with a pending run
+    state_path = pre_migration_kb / ".notebooklm-state.yaml"
+    state_path.write_text(
+        "runs:\n"
+        "  - id: run-001\n"
+        "    status: pending\n"
+        "    started_at: '2026-04-24T00:00:00Z'\n"
+        "notebooks: []\n"
+        "last_podcast: null\n"
+        "last_digest: null\n"
+        "last_quiz: null\n",
+        encoding="utf-8",
+    )
+
+    rc = M.main(_cli(pre_migration_kb))
+    assert rc == 2, f"Expected exit 2 (PendingWorkError), got {rc}"
+
+
+def test_cli_resume_mismatched_show_id_raises(pre_migration_kb: Path):
+    """dry-run builds plan.yaml with show-id quanzhan-ai; --resume --show-id other-show → exit 2."""
+    import migrate_multi_show as M
+
+    # First: dry-run to build .kb-migration/plan.yaml
+    rc = M.main(_cli(pre_migration_kb, "--dry-run"))
+    assert rc == 0, f"dry-run setup failed with exit {rc}"
+
+    plan_path = pre_migration_kb / ".kb-migration" / "plan.yaml"
+    assert plan_path.exists()
+
+    # Now attempt resume with wrong show-id
+    rc2 = M.main([
+        "--project-root", str(pre_migration_kb),
+        "--show-id", "other-show",
+        "--resume",
+    ])
+    assert rc2 == 2, f"Expected exit 2 (ResumeMismatchError), got {rc2}"
+
+
+def test_cli_full_happy_path(pre_migration_kb: Path):
+    """Full non-dry-run migration: exits 0, live tree matches staging, lock file unlinked."""
+    import migrate_multi_show as M
+
+    rc = M.main(_cli(pre_migration_kb))
+    assert rc == 0, f"Full migration exited with {rc}"
+
+    # Verify live tree: nested episode exists
+    nested_ep = (
+        pre_migration_kb / "wiki" / "episodes" / "quanzhan-ai" / "ep-1-test.md"
+    )
+    assert nested_ep.exists(), "nested episode not committed to live tree"
+
+    # Verify legacy flat episode deleted
+    flat_ep = pre_migration_kb / "wiki" / "episodes" / "ep-1-test.md"
+    assert not flat_ep.exists(), "legacy flat episode not removed"
+
+    # Verify kb.yaml has shows
+    import yaml as _yaml
+    kb = _yaml.safe_load((pre_migration_kb / "kb.yaml").read_text(encoding="utf-8"))
+    assert "shows" in kb["integrations"]
+    assert kb["integrations"]["shows"][0]["id"] == "quanzhan-ai"
+
+    # Verify lock file was released
+    assert not (pre_migration_kb / ".kb-mutation.lock").exists(), \
+        ".kb-mutation.lock not released after successful migration"
+
+
+def test_cli_rejects_bad_show_id_format(pre_migration_kb: Path):
+    """--show-id with uppercase letters → exit 1 (validation error)."""
+    import migrate_multi_show as M
+
+    rc = M.main([
+        "--project-root", str(pre_migration_kb),
+        "--show-id", "QuanZhanAI",          # uppercase — invalid
+        "--show-title", "全栈AI",
+        "--show-hosts", "瓜瓜龙,海发菜",
+    ])
+    assert rc == 1, f"Expected exit 1 for bad show-id, got {rc}"
+
+
+def test_cli_blocks_on_partially_migrated(pre_migration_kb: Path):
+    """KB already partially migrated without --resume → exit 2 with 'use --resume' message."""
+    import migrate_multi_show as M
+
+    # Mutate kb.yaml to add integrations.shows[] (but leave flat episode → partial)
+    kb_path = pre_migration_kb / "kb.yaml"
+    kb = yaml.safe_load(kb_path.read_text())
+    kb["integrations"]["shows"] = [{
+        "id": "quanzhan-ai",
+        "title": "全栈AI",
+        "wiki_episodes_dir": "episodes/quanzhan-ai",
+        "episodes_registry": "episodes.yaml",
+    }]
+    kb_path.write_text(yaml.safe_dump(kb, allow_unicode=True), encoding="utf-8")
+    # ep-1-test.md still flat → partially_migrated
+
+    from io import StringIO
+    import sys as _sys
+
+    captured = StringIO()
+    old_stderr = _sys.stderr
+    _sys.stderr = captured
+    try:
+        rc = M.main(_cli(pre_migration_kb))
+    finally:
+        _sys.stderr = old_stderr
+
+    assert rc == 2, f"Expected exit 2 for partially_migrated, got {rc}"
+    output = captured.getvalue()
+    assert "resume" in output.lower(), \
+        f"Expected 'resume' hint in stderr output, got: {output!r}"

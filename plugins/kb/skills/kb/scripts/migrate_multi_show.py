@@ -1177,30 +1177,223 @@ def classify_kb_state(project_root) -> Literal["unmigrated", "partially_migrated
 
 
 # ---------------------------------------------------------------------------
-# CLI entry point (full migration CLI in Task 18 — stub here)
+# CLI entry point
 # ---------------------------------------------------------------------------
 
-if __name__ == "__main__":
+_SHOW_ID_RE = re.compile(r'^[a-z][a-z0-9\-]{0,31}$')
+
+
+def main(argv=None) -> int:
+    """Entry point callable in-process from tests.
+
+    Returns an integer exit code; the ``__main__`` block calls
+    ``sys.exit(main())``.
+    """
     import argparse
 
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--project-root", default=".", help="KB project root (contains kb.yaml)")
+    parser = argparse.ArgumentParser(
+        description=__doc__,
+        # exit_on_error=False lets callers (tests) catch parse errors as
+        # ArgumentError instead of a SystemExit.  Available since Python 3.9.
+        exit_on_error=False,
+    )
     parser.add_argument(
-        "--classify-only",
-        action="store_true",
+        "--project-root", default=".",
+        help="KB project root (contains kb.yaml).",
+    )
+    parser.add_argument(
+        "--show-id", default=None,
+        help="Default show ID (required for initial migration). "
+             r"Format: ^[a-z][a-z0-9\-]{0,31}$",
+    )
+    parser.add_argument(
+        "--show-title", default=None,
+        help="Default show title (required for initial migration).",
+    )
+    parser.add_argument(
+        "--show-hosts", default=None,
+        help="Comma-separated host list (required for initial migration).",
+    )
+    parser.add_argument(
+        "--dry-run", action="store_true",
+        help="Run Phase A + Phase B; skip Phase A-bis live rewrites and "
+             "Phase C commits. Leaves .kb-migration/ intact for inspection.",
+    )
+    parser.add_argument(
+        "--resume", action="store_true",
+        help="Continue an interrupted migration using existing .kb-migration/.",
+    )
+    parser.add_argument(
+        "--classify-only", action="store_true",
         help="Just classify the KB and print the state; no migration.",
     )
-    args = parser.parse_args()
+
+    try:
+        args = parser.parse_args(argv)
+    except (SystemExit, Exception) as exc:
+        print(f"argument error: {exc}", file=sys.stderr)
+        return 1
 
     project_root = Path(args.project_root).resolve()
 
+    # --classify-only: just print state and exit
     if args.classify_only:
         print(classify_kb_state(project_root))
-        sys.exit(0)
+        return 0
 
-    # Full migration flow comes in Tasks 14-18.
+    # --resume path
+    if args.resume:
+        return _run_resume(project_root, args)
+
+    # Initial migration path
+    return _run_initial(project_root, args)
+
+
+def _validate_show_flags(args) -> str | None:
+    """Validate --show-id / --show-title / --show-hosts.
+
+    Returns an error message string on failure, or None on success.
+    """
+    if not args.show_id:
+        return "--show-id is required for initial migration"
+    if not _SHOW_ID_RE.match(args.show_id):
+        return (
+            f"--show-id={args.show_id!r} is invalid; "
+            r"must match ^[a-z][a-z0-9\-]{0,31}$"
+        )
+    if not args.show_title or not args.show_title.strip():
+        return "--show-title is required and must be non-empty"
+    if not args.show_hosts or not args.show_hosts.strip():
+        return "--show-hosts is required and must be non-empty"
+    return None
+
+
+def _run_initial(project_root: Path, args) -> int:
+    """Non-resume migration workflow."""
+    try:
+        with kb_mutation_lock(project_root, command="kb-migrate", timeout=5.0):
+            # Step 1: classify
+            state_class = classify_kb_state(project_root)
+            if state_class == "fully_migrated":
+                print("Already migrated — nothing to do.")
+                return 0
+            if state_class == "partially_migrated":
+                print(
+                    "KB is partially migrated. Use --resume to continue.",
+                    file=sys.stderr,
+                )
+                return 2
+
+            # Step 2: idle check — acquire lock FIRST, then check
+            state_path = project_root / ".notebooklm-state.yaml"
+            show_id_for_idle = args.show_id or ""
+            state = load_state_file(state_path, default_show_id=show_id_for_idle)
+            pending_runs = find_pending_runs(state)
+            pending_nb = find_pending_notebooks(state)
+            if pending_runs or pending_nb:
+                raise PendingWorkError(
+                    f"KB has {len(pending_runs)} pending runs and "
+                    f"{len(pending_nb)} pending notebooks; cannot migrate"
+                )
+
+            # Step 3: validate CLI flags
+            err = _validate_show_flags(args)
+            if err:
+                print(f"Error: {err}", file=sys.stderr)
+                return 1
+
+            show_hosts = [h.strip() for h in args.show_hosts.split(",") if h.strip()]
+
+            # Step 4: Phase A
+            plan = phase_a_plan_and_stage(
+                project_root,
+                default_show_id=args.show_id,
+                default_show_title=args.show_title,
+                default_show_hosts=show_hosts,
+            )
+
+            # Step 5: dry-run stops here
+            if args.dry_run:
+                phase_b_validate(project_root, plan)
+                print("Dry run complete. .kb-migration/ left intact for inspection.")
+                return 0
+
+            # Step 6: full run
+            phase_a_bis_sidecars(project_root, plan)
+            phase_b_validate(project_root, plan)
+            phase_c_commit(project_root, plan, resume=False)
+
+            _print_summary(plan)
+            return 0
+
+    except LockBusyError as exc:
+        print(f"Cannot acquire lock: {exc}", file=sys.stderr)
+        return 75
+    except PendingWorkError as exc:
+        print(f"Pending work prevents migration: {exc}", file=sys.stderr)
+        return 2
+    except ShowConfigError as exc:
+        print(f"Show configuration error: {exc}", file=sys.stderr)
+        return 1
+
+
+def _run_resume(project_root: Path, args) -> int:
+    """Resume workflow — continues from an existing .kb-migration/."""
+    try:
+        with kb_mutation_lock(project_root, command="kb-migrate", timeout=5.0):
+            plan_path = project_root / MIGRATION_DIR / PLAN_FILE
+            if not plan_path.exists():
+                print(
+                    f"Nothing to resume: {plan_path} not found.",
+                    file=sys.stderr,
+                )
+                return 2
+
+            plan = yaml.safe_load(plan_path.read_text(encoding="utf-8")) or {}
+
+            # Validate show-id matches
+            if args.show_id and args.show_id != plan.get("default_show_id"):
+                raise ResumeMismatchError(
+                    f"--show-id={args.show_id!r} doesn't match "
+                    f"plan.yaml default_show_id={plan.get('default_show_id')!r}"
+                )
+
+            # Phase B first to ensure staging still valid
+            phase_b_validate(project_root, plan)
+
+            if args.dry_run:
+                print("Dry-run resume complete — staging validated, no commits written.")
+                return 0
+
+            # Phase A-bis is idempotent (detects already-rewritten sidecars)
+            phase_a_bis_sidecars(project_root, plan)
+            phase_c_commit(project_root, plan, resume=True)
+
+            _print_summary(plan)
+            return 0
+
+    except LockBusyError as exc:
+        print(f"Cannot acquire lock: {exc}", file=sys.stderr)
+        return 75
+    except ResumeMismatchError as exc:
+        print(f"Resume mismatch: {exc}", file=sys.stderr)
+        return 2
+    except ShowConfigError as exc:
+        print(f"Show configuration error: {exc}", file=sys.stderr)
+        return 1
+
+
+def _print_summary(plan: dict) -> None:
+    """Print a short migration summary."""
+    commit_order = plan.get("commit_order") or []
+    n_episodes = sum(1 for e in commit_order if e.get("category") == "episode")
+    n_stubs = sum(1 for e in commit_order if e.get("category") == "stub")
+    n_other = sum(1 for e in commit_order if e.get("category") == "other")
     print(
-        "Full migration not implemented yet — this is Task 13 (detection only).",
-        file=sys.stderr,
+        f"Migration complete: {n_episodes} episode(s), "
+        f"{n_stubs} stub(s), {n_other} other file(s) migrated."
     )
-    sys.exit(2)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
