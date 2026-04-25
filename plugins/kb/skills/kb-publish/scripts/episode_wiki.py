@@ -11,6 +11,13 @@ This module is split into layers that are added incrementally across tasks:
   Task 5 — orchestration: orchestrate_episode_index (Haiku-injected callable).
   Task 6 — dedup judge: judge_candidate_episode.
   Tasks 6-9 (multi-show) — show-scoped scan, EpRef dict form throughout, new helpers.
+
+NOTE: this module carries temporary single-show compatibility shims
+(`_scan_episode_wiki_legacy`, `_compute_depth_deltas_legacy`,
+`_compute_stub_update_legacy`) to avoid breaking pre-migration callers
+during the multi-show rollout. These will be removed in Task 23 of the
+multi-show plan, after every caller has been updated to pass a `Show`.
+See docs/superpowers/plans/2026-04-23-multi-show-podcast-support-implementation.md
 """
 from __future__ import annotations
 
@@ -1016,6 +1023,7 @@ def index_episode_transactional(
                         if show_id:
                             updated_fm = compute_stub_update(fm, c, episode_id, show_id)
                         else:
+                            # TODO(task-23): remove this legacy branch once every caller passes a Show.
                             updated_fm = _compute_stub_update_legacy(fm, c, episode_id)
                         if updated_fm is not None:
                             stub_updates_to_apply.append((dest, updated_fm))
@@ -1063,6 +1071,7 @@ def index_episode_transactional(
         if show:
             scan_episode_wiki(staging, show, strict=True)
         else:
+            # TODO(task-23): remove this legacy branch once every caller passes a Show.
             # Legacy: scan the flat episodes dir
             _scan_episode_wiki_legacy(staging, strict=True)
 
@@ -1113,8 +1122,13 @@ def _compute_stub_update_legacy(
     concept: dict,
     episode_id: int,
 ) -> dict | None:
-    """Legacy (no show_id) compute_stub_update for backward compat.
+    """DEPRECATED — legacy single-show fallback.
 
+    Removed in Task 23 of the multi-show migration plan, after Tasks 10 + 19 +
+    20 wire a `Show` object through every call site. Do NOT call this from new
+    code. Existing callers MUST migrate to the new (Show-aware) API.
+
+    Legacy (no show_id) compute_stub_update for backward compat.
     Emits ep-N strings instead of {show, ep} dicts.
     Used when no Show object is available.
     """
@@ -1148,7 +1162,14 @@ def _compute_stub_update_legacy(
 
 
 def _scan_episode_wiki_legacy(wiki_dir: Path, strict: bool = False) -> list[IndexedEpisode]:
-    """Legacy flat scan for use during staging smoke-parse when no Show is available."""
+    """DEPRECATED — legacy single-show fallback.
+
+    Removed in Task 23 of the multi-show migration plan, after Tasks 10 + 19 +
+    20 wire a `Show` object through every call site. Do NOT call this from new
+    code. Existing callers MUST migrate to the new (Show-aware) API.
+
+    Legacy flat scan for use during staging smoke-parse when no Show is available.
+    """
     ep_dir = wiki_dir / "episodes"
     if not ep_dir.is_dir():
         return []
@@ -1288,6 +1309,7 @@ def orchestrate_episode_index(
     if show:
         all_eps = scan_episode_wiki(wiki_dir, show, strict=False)
     else:
+        # TODO(task-23): remove this legacy branch once every caller passes a Show.
         all_eps = _scan_episode_wiki_legacy(wiki_dir, strict=False)
 
     # Recent-episodes context: most-recent 3 EXCLUDING the current episode.
@@ -1354,6 +1376,7 @@ def orchestrate_episode_index(
     if show_id:
         data["concepts"] = compute_depth_deltas(show_id, data["concepts"], others)
     else:
+        # TODO(task-23): remove this legacy branch once every caller passes a Show.
         # Legacy path: no show, use old-style coverage map
         coverage = concepts_covered_by_episodes(others)
         data["concepts"] = _compute_depth_deltas_legacy(data["concepts"], coverage)
@@ -1372,8 +1395,13 @@ def _compute_depth_deltas_legacy(
     concepts: list[dict],
     coverage_map: dict[str, list[dict]],
 ) -> list[dict]:
-    """Legacy compute_depth_deltas that emits prior_episode_ref as bare int.
+    """DEPRECATED — legacy single-show fallback.
 
+    Removed in Task 23 of the multi-show migration plan, after Tasks 10 + 19 +
+    20 wire a `Show` object through every call site. Do NOT call this from new
+    code. Existing callers MUST migrate to the new (Show-aware) API.
+
+    Legacy compute_depth_deltas that emits prior_episode_ref as bare int.
     Used when no Show object is available (pre-migration or legacy callers).
     """
     out = []
@@ -1430,6 +1458,7 @@ def judge_candidate_episode(
     if show:
         all_eps = scan_episode_wiki(wiki_dir, show, strict=False)
     else:
+        # TODO(task-23): remove this legacy branch once every caller passes a Show.
         all_eps = _scan_episode_wiki_legacy(wiki_dir, strict=False)
 
     coverage = concepts_covered_by_episodes(all_eps)

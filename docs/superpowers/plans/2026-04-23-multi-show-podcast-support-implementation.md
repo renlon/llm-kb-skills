@@ -1802,12 +1802,20 @@ The subagent executing each task pulls the exact test code from the spec (§11 l
 - **Files:** modify `plugins/kb/skills/kb/SKILL.md`.
 - **Commit:** `docs(kb): document /kb migrate subcommand`
 
-## Task 23: Version bump to 2.0.0 + full test run
+## Task 23: Version bump to 2.0.0 + shim removal + full test run
 
-- **Goal:** bump `plugins/kb/.claude-plugin/plugin.json` version to `2.0.0` (major, breaking). Run the full test suite to confirm green.
-- **Files:** modify `plugin.json`.
-- **Tests:** `pytest plugins/kb/skills/*/scripts/tests/ -v` — all pass.
-- **Commit:** `chore: bump kb plugin to 2.0.0 for multi-show support`
+- **Goal:** bump `plugins/kb/.claude-plugin/plugin.json` version to `2.0.0` (major, breaking). Remove the temporary legacy shims carried in `episode_wiki.py` during the multi-show rollout. Run the full test suite to confirm green.
+- **Files:** modify `plugin.json`, modify `plugins/kb/skills/kb-publish/scripts/episode_wiki.py`, modify `plugins/kb/skills/kb-publish/scripts/tests/test_episode_wiki.py`.
+- **Shim removal steps:**
+  1. Delete `_scan_episode_wiki_legacy`, `_compute_depth_deltas_legacy`, `_compute_stub_update_legacy` from `episode_wiki.py`.
+  2. Remove the `show=None` defaults from `scan_episode_wiki` — `show: Show` becomes required.
+  3. Remove the `if show_id:` / else branches in `orchestrate_episode_index`, `judge_candidate_episode`, `index_episode_transactional`. Every call site must provide a Show (Tasks 10, 19, 20 make this true).
+  4. Remove the `known_shows=None` fallback from `_parse_episode_article` — `known_shows` becomes required.
+  5. Delete the deprecation NOTE at the top of `episode_wiki.py`.
+  6. Update every test in `test_episode_wiki.py` that passed `wiki_fixture, strict=False` without a Show to pass a Show object.
+- **Tests:** `pytest plugins/kb/skills/*/scripts/tests/ -v` — all pass after shim removal. Any test that still relies on the legacy shim is migrated or deleted (tests for removed behavior should go).
+- **Verification:** `grep -n "_legacy\|show_id = \"\"\|known_shows=None\|show: Show | None = None" plugins/kb/skills/kb-publish/scripts/episode_wiki.py` must return zero hits.
+- **Commit:** `chore: bump kb plugin to 2.0.0 for multi-show support + shim removal`
 
 ## Task 23.5: End-to-end smoke test harness
 
