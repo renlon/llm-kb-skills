@@ -199,20 +199,6 @@ def render_markdown(sub_segments: Sequence[dict[str, Any]], title: str) -> str:
     return f"# {title}\n\n{body}\n"
 
 
-_FILENAME_PATTERN = re.compile(r"^podcast-(?P<theme>.+)-(?P<date>\d{4}-\d{2}-\d{2})(?:\.raw)?\.(?:mp3|wav|m4a|flac)$", re.IGNORECASE)
-
-
-def derive_title(filename: str) -> str:
-    """Derive an H1 title from a raw audio filename, following the '全栈AI — <theme> (date)' convention."""
-    m = _FILENAME_PATTERN.match(Path(filename).name)
-    if m:
-        return f"全栈AI — {m.group('theme')} ({m.group('date')})"
-    # Fallback: strip common suffixes, prefix brand.
-    stem = Path(filename).stem
-    stem = re.sub(r"\.raw$", "", stem, flags=re.IGNORECASE)
-    return f"全栈AI — {stem}"
-
-
 def build_result_json(
     *,
     success: bool,
@@ -322,7 +308,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--device", default="auto", choices=["auto", "cpu", "cuda"],
                         help="Inference device (mps not supported)")
     parser.add_argument("--language", default="zh", help="Whisper language hint")
-    parser.add_argument("--title", default=None, help="Optional H1 title (else derived from filename)")
+    parser.add_argument("--title", required=True, help="Episode title (required; no auto-derivation)")
     parser.add_argument("--json", action="store_true", help="Emit JSON status to stdout")
 
     try:
@@ -418,8 +404,7 @@ def main(argv: list[str] | None = None) -> int:
 
     # Stage 4: render + write
     vtt_text = render_vtt(mapped, offset=args.vtt_offset_seconds)
-    title = args.title or derive_title(args.audio)
-    md_text = render_markdown(mapped, title=title)
+    md_text = render_markdown(mapped, title=args.title)
 
     Path(args.output_vtt).parent.mkdir(parents=True, exist_ok=True)
     Path(args.output_md).parent.mkdir(parents=True, exist_ok=True)

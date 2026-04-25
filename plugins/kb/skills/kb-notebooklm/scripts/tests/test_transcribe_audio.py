@@ -245,14 +245,16 @@ def test_render_markdown_merges_consecutive_same_speaker():
     assert "**海发菜:** 好的." in md
 
 
-def test_derive_title_from_filename():
-    assert T.derive_title("podcast-kv-cache-2026-04-20.raw.mp3") == "全栈AI — kv-cache (2026-04-20)"
-    assert T.derive_title("podcast-attention-2026-05-12.mp3") == "全栈AI — attention (2026-05-12)"
-
-
-def test_derive_title_falls_back_to_basename_when_pattern_mismatched():
-    # Unrecognized pattern → fall back to cleanup-only.
-    assert T.derive_title("strange-name.wav").startswith("全栈AI — ")
+def test_transcribe_missing_title_errors():
+    """Invoking the CLI without --title must exit non-zero with a clear error."""
+    rc = T.main([
+        "--audio", "/tmp/fake.mp3",
+        "--hosts", '["瓜瓜龙", "海发菜"]',
+        "--output-vtt", "/tmp/out.vtt",
+        "--output-md", "/tmp/out.md",
+        # --title intentionally omitted
+    ])
+    assert rc != 0
 
 
 # ------------------------------
