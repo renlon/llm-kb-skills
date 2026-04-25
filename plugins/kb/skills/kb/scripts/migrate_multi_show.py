@@ -715,8 +715,16 @@ def restore_sidecars_from_snapshots(project_root: Path, plan: dict) -> None:
 # Phase B: full validation of staged tree + live sidecars
 # ---------------------------------------------------------------------------
 
-def phase_b_validate(project_root: Path, plan: dict) -> None:
-    """Validate the staged tree and live sidecars.
+def phase_b_validate(
+    project_root: Path,
+    plan: dict,
+    *,
+    check_live_sidecars: bool = True,
+) -> None:
+    """Validate the staged tree and (optionally) live sidecars.
+
+    ``check_live_sidecars=False`` is used in dry-run mode where Phase A-bis
+    (which writes the ``show:`` field) has not yet run.
 
     On ANY failure: restore Phase A-bis sidecars from snapshot, delete
     .kb-migration/staging/ (keep before/ for debugging), then raise.
@@ -911,22 +919,24 @@ def phase_b_validate(project_root: Path, plan: dict) -> None:
             errors.append(f"staged .notebooklm-state.yaml load failed: {e}")
 
         # 8. Every live sidecar must now have show: <default_show_id>
-        output_path = Path(plan["output_path"])
-        for pattern_base in (output_path, output_path / "notebooklm"):
-            if not pattern_base.exists():
-                continue
-            for sidecar_path in sorted(pattern_base.glob("*.manifest.yaml")):
-                if not sidecar_path.is_file():
+        # Skip in dry-run (Phase A-bis has not run yet, so sidecars lack the field).
+        if check_live_sidecars:
+            output_path = Path(plan["output_path"])
+            for pattern_base in (output_path, output_path / "notebooklm"):
+                if not pattern_base.exists():
                     continue
-                try:
-                    content = yaml.safe_load(sidecar_path.read_text(encoding="utf-8")) or {}
-                    if content.get("show") != default_show_id:
-                        errors.append(
-                            f"sidecar {sidecar_path.name}: missing or wrong show field "
-                            f"(got {content.get('show')!r}, expected {default_show_id!r})"
-                        )
-                except Exception as e:
-                    errors.append(f"sidecar {sidecar_path.name}: load failed: {e}")
+                for sidecar_path in sorted(pattern_base.glob("*.manifest.yaml")):
+                    if not sidecar_path.is_file():
+                        continue
+                    try:
+                        content = yaml.safe_load(sidecar_path.read_text(encoding="utf-8")) or {}
+                        if content.get("show") != default_show_id:
+                            errors.append(
+                                f"sidecar {sidecar_path.name}: missing or wrong show field "
+                                f"(got {content.get('show')!r}, expected {default_show_id!r})"
+                            )
+                    except Exception as e:
+                        errors.append(f"sidecar {sidecar_path.name}: load failed: {e}")
 
         if errors:
             raise ValueError("Phase B validation failed:\n" + "\n".join(errors))
@@ -1314,7 +1324,8 @@ def _run_initial(project_root: Path, args) -> int:
 
             # Step 5: dry-run stops here
             if args.dry_run:
-                phase_b_validate(project_root, plan)
+                # Phase A-bis has NOT run yet — skip the live sidecar check
+                phase_b_validate(project_root, plan, check_live_sidecars=False)
                 print("Dry run complete. .kb-migration/ left intact for inspection.")
                 return 0
 

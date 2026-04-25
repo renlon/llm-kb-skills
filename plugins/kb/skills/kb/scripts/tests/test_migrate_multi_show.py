@@ -898,7 +898,7 @@ def test_cli_dry_run_with_corrupt_staging(pre_migration_kb: Path, monkeypatch):
         and ".kb-migration" not in str(p)
     }
 
-    def _failing_phase_b(project_root, plan):
+    def _failing_phase_b(project_root, plan, **kwargs):
         raise ValueError("simulated Phase B failure")
 
     monkeypatch.setattr(M, "phase_b_validate", _failing_phase_b)
